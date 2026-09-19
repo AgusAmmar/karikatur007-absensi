@@ -2,23 +2,30 @@
 ============================================================
   SISTEM ABSENSI KARANG TARUNA KARIKATUR 007
   Desa Mekarsari RT.07/RW.07
-  Secure Version v3.0
+  Secure Version v3.1 — Fix Waktu WIB
 ============================================================
-  Fitur Keamanan:
+  Fitur:
+  - Waktu WIB (Asia/Jakarta) realtime
   - Bcrypt password hashing
-  - Rate limiting (5 login/menit)
+  - Rate limiting login
   - CSRF protection
   - Security headers
-  - Login attempt logging
   - Auto logout idle 2 jam
   - Force HTTPS di production
 ============================================================
 """
 
 import subprocess, sys, os, sqlite3, webbrowser, threading, time, random, hashlib, csv, io, json, secrets
-from datetime import datetime, timedelta
-from functools import wraps
-from queue import Queue, Empty
+from datetime import datetime, timedelta, timezone
+
+# ============================================================
+# SET TIMEZONE KE WIB (Asia/Jakarta)
+# ============================================================
+os.environ['TZ'] = 'Asia/Jakarta'
+try:
+    time.tzset()  # Linux/Mac
+except AttributeError:
+    pass  # Windows: pakai fallback manual di sekarang_wib()
 
 # Auto-install dependencies
 REQUIRED_PACKAGES = [
@@ -47,6 +54,30 @@ from werkzeug.middleware.proxy_fix import ProxyFix
 import bcrypt
 
 # ============================================================
+# FUNGSI WAKTU WIB
+# ============================================================
+def sekarang_wib():
+    """Return datetime WIB (UTC+7) — akurat di lokal & Railway"""
+    try:
+        from zoneinfo import ZoneInfo
+        return datetime.now(ZoneInfo("Asia/Jakarta"))
+    except Exception:
+        utc_now = datetime.now(timezone.utc)
+        return utc_now.astimezone(timezone(timedelta(hours=7)))
+
+def tgl_wib():
+    """Return tanggal WIB format YYYY-MM-DD"""
+    return sekarang_wib().strftime('%Y-%m-%d')
+
+def jam_wib():
+    """Return jam WIB format HH:MM:SS"""
+    return sekarang_wib().strftime('%H:%M:%S')
+
+def waktu_lengkap_wib():
+    """Return datetime WIB format YYYY-MM-DD HH:MM:SS"""
+    return sekarang_wib().strftime('%Y-%m-%d %H:%M:%S')
+
+# ============================================================
 # KONFIGURASI
 # ============================================================
 ORG = {
@@ -61,7 +92,7 @@ ORG = {
 # SECRET_KEY FIXED — jangan diubah setelah deploy
 SECRET_KEY = os.environ.get('SECRET_KEY', 'karikatur007-fixed-secret-key-2026-aman')
 ADMIN_USERNAME = os.environ.get('ADMIN_USERNAME', 'admin')
-ADMIN_PASSWORD = os.environ.get('ADMIN_PASSWORD', 'admin123')
+ADMIN_PASSWORD = os.environ.get('ADMIN_PASSWORD', 'Kar1katur007!Mekarsari#2026')
 
 IS_PRODUCTION = bool(
     os.environ.get('RAILWAY_ENVIRONMENT') or
@@ -81,8 +112,8 @@ app.config['SESSION_COOKIE_SAMESITE'] = 'None'
 app.config['SESSION_COOKIE_SECURE'] = True
 app.config['SESSION_COOKIE_HTTPONLY'] = True
 app.config['SESSION_COOKIE_DOMAIN'] = None
-app.config['PERMANENT_SESSION_LIFETIME'] = timedelta(hours=2)  # auto logout 2 jam
-app.config['MAX_CONTENT_LENGTH'] = 5 * 1024 * 1024  # max 5MB request
+app.config['PERMANENT_SESSION_LIFETIME'] = timedelta(hours=2)
+app.config['MAX_CONTENT_LENGTH'] = 5 * 1024 * 1024
 
 # Rate limiter
 limiter = Limiter(
@@ -103,13 +134,11 @@ sse_clients = []
 # ============================================================
 @app.after_request
 def add_security_headers(response):
-    """Tambah security headers ke semua response"""
     response.headers['X-Content-Type-Options'] = 'nosniff'
     response.headers['X-Frame-Options'] = 'SAMEORIGIN'
     response.headers['X-XSS-Protection'] = '1; mode=block'
     response.headers['Referrer-Policy'] = 'strict-origin-when-cross-origin'
     response.headers['Permissions-Policy'] = 'geolocation=(), microphone=(), camera=()'
-    # CSP: izinkan inline style & script (dibutuhkan), Google Fonts
     response.headers['Content-Security-Policy'] = (
         "default-src 'self'; "
         "style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; "
@@ -126,7 +155,6 @@ def add_security_headers(response):
 # ============================================================
 @app.before_request
 def force_https():
-    """Redirect HTTP ke HTTPS di production"""
     if IS_PRODUCTION and not request.is_secure:
         if request.headers.get('X-Forwarded-Proto', 'http') != 'https':
             url = request.url.replace('http://', 'https://', 1)
@@ -136,13 +164,11 @@ def force_https():
 # CSRF PROTECTION
 # ============================================================
 def generate_csrf_token():
-    """Generate CSRF token per session"""
     if '_csrf_token' not in session:
         session['_csrf_token'] = secrets.token_urlsafe(32)
     return session['_csrf_token']
 
 def validate_csrf_token():
-    """Validate CSRF token dari request"""
     token_from_header = request.headers.get('X-CSRF-Token', '')
     token_from_session = session.get('_csrf_token', '')
     if not token_from_session or not token_from_header:
@@ -151,10 +177,8 @@ def validate_csrf_token():
 
 @app.before_request
 def csrf_protect():
-    """Validasi CSRF untuk semua POST/PUT/DELETE ke /api/"""
     if request.method in ['POST', 'PUT', 'DELETE', 'PATCH']:
         if request.path.startswith('/api/'):
-            # Skip login endpoint (belum ada session/token)
             if request.path == '/api/login':
                 return
             if not validate_csrf_token():
@@ -185,19 +209,15 @@ def server_error(e):
 # DATABASE
 # ============================================================
 def hash_password(password):
-    """Hash password dengan bcrypt"""
     return bcrypt.hashpw(password.encode('utf-8'), bcrypt.gensalt(rounds=12)).decode('utf-8')
 
 def verify_password(password, hashed):
-    """Verifikasi password — support bcrypt & SHA256 (legacy)"""
     try:
         return bcrypt.checkpw(password.encode('utf-8'), hashed.encode('utf-8'))
     except:
-        # Fallback ke SHA256 untuk password lama
         return hashlib.sha256(password.encode()).hexdigest() == hashed
 
 def init_db():
-    """Inisialisasi database"""
     conn = sqlite3.connect(DB_FILE)
     c = conn.cursor()
     
@@ -236,7 +256,6 @@ def init_db():
         waktu TEXT NOT NULL
     )''')
     
-    # Tabel log percobaan login
     c.execute('''CREATE TABLE IF NOT EXISTS login_attempts (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         username TEXT,
@@ -252,8 +271,9 @@ def init_db():
             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)''',
             ('K007-001', ADMIN_USERNAME, hash_password(ADMIN_PASSWORD), 'Administrator',
              'Ketua', 'Pengurus', 'admin@karikatur007.id', 'admin',
-             datetime.now().strftime('%Y-%m-%d %H:%M:%S')))
+             waktu_lengkap_wib()))
         print(f"✅ Admin dibuat: {ADMIN_USERNAME}")
+        print(f"   Password: {ADMIN_PASSWORD}")
         if ADMIN_PASSWORD == 'admin123':
             print("⚠️  PENTING: Ganti password admin setelah login pertama!")
     
@@ -262,25 +282,22 @@ def init_db():
     print(f"✅ Database siap: {DB_FILE}")
 
 def log_login_attempt(username, berhasil):
-    """Catat percobaan login"""
     try:
         ip = request.remote_addr or 'unknown'
-        # Kalau di belakang proxy, ambil dari X-Forwarded-For
         if request.headers.get('X-Forwarded-For'):
             ip = request.headers.get('X-Forwarded-For').split(',')[0].strip()
         
         conn = sqlite3.connect(DB_FILE)
         c = conn.cursor()
         c.execute('INSERT INTO login_attempts (username, ip_address, berhasil, waktu) VALUES (?, ?, ?, ?)',
-                  (username, ip, 1 if berhasil else 0, datetime.now().strftime('%Y-%m-%d %H:%M:%S')))
+                  (username, ip, 1 if berhasil else 0, waktu_lengkap_wib()))
         conn.commit()
         conn.close()
     except:
         pass
 
 def log_event(tipe, anggota_id, nama, pesan):
-    """Log event untuk realtime"""
-    waktu = datetime.now().strftime('%H:%M:%S')
+    waktu = jam_wib()
     conn = sqlite3.connect(DB_FILE)
     c = conn.cursor()
     c.execute('INSERT INTO event_log (tipe, anggota_id, nama, pesan, waktu) VALUES (?, ?, ?, ?, ?)',
@@ -322,7 +339,6 @@ def admin_required(f):
 # ============================================================
 @app.route('/login', methods=['GET'])
 def login_page():
-    # Generate CSRF token untuk login form
     csrf_token = secrets.token_urlsafe(32)
     session['_csrf_token'] = csrf_token
     return render_template_string(LOGIN_HTML, o=ORG, csrf_token=csrf_token)
@@ -333,7 +349,7 @@ def login_page():
 def api_login():
     try:
         data = request.get_json() or {}
-        username = data.get('username', '').strip()[:50]  # batasi panjang
+        username = data.get('username', '').strip()[:50]
         password = data.get('password', '')[:100]
         
         if not username or not password:
@@ -347,7 +363,6 @@ def api_login():
         
         if not row:
             log_login_attempt(username, False)
-            # Delay untuk cegah timing attack
             time.sleep(0.5)
             return jsonify({'success': False, 'message': 'Username atau password salah'})
         
@@ -360,15 +375,12 @@ def api_login():
             log_login_attempt(username, False)
             return jsonify({'success': False, 'message': 'Akun tidak aktif'})
         
-        # Login berhasil
         session.permanent = True
         session['user_id'] = row[0]
         session['username'] = row[1]
         session['nama'] = row[2]
         session['role'] = row[3]
         session['_csrf_token'] = secrets.token_urlsafe(32)
-        
-        # Regenerate session untuk cegah session fixation
         session.modified = True
         
         log_login_attempt(username, True)
@@ -391,18 +403,19 @@ def api_me():
         'username': session['username'],
         'nama': session['nama'],
         'role': session['role'],
-        'csrf_token': session.get('_csrf_token', '')
+        'csrf_token': session.get('_csrf_token', ''),
+        'server_time_wib': waktu_lengkap_wib()
     })
 
 # ============================================================
-# API ABSENSI
+# API ABSENSI — PAKAI WAKTU WIB
 # ============================================================
 @app.route('/api/absensi/status', methods=['GET'])
 def absensi_status():
     if 'user_id' not in session:
         return jsonify({'success': False}), 401
     user_id = session['user_id']
-    today = datetime.now().strftime('%Y-%m-%d')
+    today = tgl_wib()
     conn = sqlite3.connect(DB_FILE)
     c = conn.cursor()
     c.execute('SELECT id, jam_masuk, jam_pulang, status FROM absensi WHERE anggota_id = ? AND tanggal = ?',
@@ -421,10 +434,11 @@ def absensi_masuk():
     if 'user_id' not in session:
         return jsonify({'success': False}), 401
     user_id = session['user_id']
-    today = datetime.now().strftime('%Y-%m-%d')
-    now = datetime.now().strftime('%H:%M:%S')
+    today = tgl_wib()
+    now = jam_wib()
     data = request.get_json() or {}
     kegiatan = str(data.get('kegiatan', ''))[:200]
+    
     conn = sqlite3.connect(DB_FILE)
     c = conn.cursor()
     c.execute('SELECT id, jam_masuk FROM absensi WHERE anggota_id = ? AND tanggal = ?', (user_id, today))
@@ -447,8 +461,9 @@ def absensi_pulang():
     if 'user_id' not in session:
         return jsonify({'success': False}), 401
     user_id = session['user_id']
-    today = datetime.now().strftime('%Y-%m-%d')
-    now = datetime.now().strftime('%H:%M:%S')
+    today = tgl_wib()
+    now = jam_wib()
+    
     conn = sqlite3.connect(DB_FILE)
     c = conn.cursor()
     c.execute('SELECT id, jam_masuk, jam_pulang FROM absensi WHERE anggota_id = ? AND tanggal = ?', (user_id, today))
@@ -471,10 +486,9 @@ def absensi_riwayat():
         return jsonify([]), 401
     user_id = session['user_id']
     role = session['role']
-    bulan = request.args.get('bulan', datetime.now().strftime('%Y-%m'))
-    # Validasi format bulan
+    bulan = request.args.get('bulan', sekarang_wib().strftime('%Y-%m'))
     if len(bulan) != 7 or bulan[4] != '-':
-        bulan = datetime.now().strftime('%Y-%m')
+        bulan = sekarang_wib().strftime('%Y-%m')
     filter_user = request.args.get('user_id')
     
     conn = sqlite3.connect(DB_FILE)
@@ -516,7 +530,7 @@ def absensi_riwayat():
 def absensi_hari_ini():
     if 'user_id' not in session or session.get('role') != 'admin':
         return jsonify([]), 403
-    today = datetime.now().strftime('%Y-%m-%d')
+    today = tgl_wib()
     conn = sqlite3.connect(DB_FILE)
     c = conn.cursor()
     c.execute('''SELECT a.id, k.nama, k.jabatan, k.divisi, a.jam_masuk, a.jam_pulang, a.status
@@ -574,9 +588,9 @@ def events_riwayat():
 def api_rekap():
     if 'user_id' not in session or session.get('role') != 'admin':
         return jsonify({'success': False, 'rekap': [], 'hari_kerja': 0}), 403
-    bulan = request.args.get('bulan', datetime.now().strftime('%Y-%m'))
+    bulan = request.args.get('bulan', sekarang_wib().strftime('%Y-%m'))
     if len(bulan) != 7:
-        bulan = datetime.now().strftime('%Y-%m')
+        bulan = sekarang_wib().strftime('%Y-%m')
     
     conn = sqlite3.connect(DB_FILE)
     c = conn.cursor()
@@ -616,9 +630,9 @@ def api_rekap():
 def export_csv():
     if 'user_id' not in session or session.get('role') != 'admin':
         return "Akses ditolak", 403
-    bulan = request.args.get('bulan', datetime.now().strftime('%Y-%m'))
+    bulan = request.args.get('bulan', sekarang_wib().strftime('%Y-%m'))
     if len(bulan) != 7:
-        bulan = datetime.now().strftime('%Y-%m')
+        bulan = sekarang_wib().strftime('%Y-%m')
     conn = sqlite3.connect(DB_FILE)
     c = conn.cursor()
     c.execute('''SELECT k.no_anggota, k.nama, k.jabatan, k.divisi, a.tanggal, a.jam_masuk, a.jam_pulang, a.status
@@ -641,9 +655,9 @@ def export_csv():
 def export_pdf():
     if 'user_id' not in session or session.get('role') != 'admin':
         return "Akses ditolak", 403
-    bulan = request.args.get('bulan', datetime.now().strftime('%Y-%m'))
+    bulan = request.args.get('bulan', sekarang_wib().strftime('%Y-%m'))
     if len(bulan) != 7:
-        bulan = datetime.now().strftime('%Y-%m')
+        bulan = sekarang_wib().strftime('%Y-%m')
     conn = sqlite3.connect(DB_FILE)
     c = conn.cursor()
     c.execute('''SELECT k.no_anggota, k.nama, k.jabatan, k.divisi, a.tanggal, a.jam_masuk, a.jam_pulang, a.status
@@ -709,7 +723,7 @@ def export_pdf():
     html += f'''</tbody></table>
 <div class="footer">
     <div>Dicetak otomatis oleh {ORG['sistem']}</div>
-    <div>{ORG['nama']} &copy; {datetime.now().year}</div>
+    <div>{ORG['nama']} &copy; {sekarang_wib().year}</div>
 </div>
 <script>setTimeout(() => window.print(), 500);</script>
 </body></html>'''
@@ -763,7 +777,7 @@ def tambah_anggota():
             (no_anggota, username, password, nama, jabatan, divisi, email, no_hp, role, created_at)
             VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'anggota', ?)''',
             (no_anggota, username, hash_password(password), nama, jabatan, divisi, email, no_hp,
-             datetime.now().strftime('%Y-%m-%d %H:%M:%S')))
+             waktu_lengkap_wib()))
         conn.commit()
         conn.close()
         return jsonify({'success': True, 'message': 'Anggota berhasil ditambahkan', 'no_anggota': no_anggota})
@@ -1045,7 +1059,6 @@ async function doLogin(e) {
     const err = document.getElementById('errorBox');
     err.classList.remove('show');
     
-    // Cooldown kalau gagal 3x
     if (failCount >= 3) {
         err.textContent = 'Terlalu banyak percobaan gagal. Tunggu 30 detik.';
         err.classList.add('show');
@@ -2088,7 +2101,7 @@ tbody td strong { color: var(--gray-900); font-weight: 700; }
         </div>
         <div class="clock-card">
             <div class="clock-content">
-                <div class="clock-label">Waktu Saat Ini</div>
+                <div class="clock-label">Waktu Saat Ini (WIB)</div>
                 <div class="clock-time" id="jamLive">--:--:--</div>
                 <div class="clock-date" id="tanggalLive">--</div>
             </div>
@@ -2447,13 +2460,12 @@ let eventSource = null;
 let pollingInterval = null;
 let CSRF_TOKEN = '';
 let idleTimer = null;
-const IDLE_TIMEOUT = 2 * 60 * 60 * 1000; // 2 jam
+const IDLE_TIMEOUT = 2 * 60 * 60 * 1000;
 
 async function fetchJSON(url, options = {}) {
     try {
         options.credentials = 'same-origin';
         if (!options.headers) options.headers = {};
-        // Tambah CSRF token untuk request yang mengubah data
         if (options.method && ['POST', 'PUT', 'DELETE', 'PATCH'].includes(options.method.toUpperCase())) {
             options.headers['X-CSRF-Token'] = CSRF_TOKEN;
         }
@@ -2494,11 +2506,22 @@ window.addEventListener('load', async () => {
     document.getElementById('userRole').textContent = data.role === 'admin' ? 'Administrator' : 'Anggota';
     document.getElementById('userAvatar').textContent = data.nama.charAt(0).toUpperCase();
     buildNav();
-    const bulanIni = new Date().toISOString().slice(0, 7);
+    
+    // Set bulan default berdasarkan WIB
+    const now = new Date();
+    const opsBulan = { timeZone: 'Asia/Jakarta', year: 'numeric', month: '2-digit' };
+    const parts = new Intl.DateTimeFormat('id-ID', opsBulan).formatToParts(now);
+    let th = '', bl = '';
+    parts.forEach(p => {
+        if (p.type === 'year') th = p.value;
+        if (p.type === 'month') bl = p.value;
+    });
+    const bulanIni = `${th}-${bl}`;
     ['filterBulanAnggota', 'filterBulanSemua', 'filterBulanRekap'].forEach(id => {
         const el = document.getElementById(id);
         if (el) el.value = bulanIni;
     });
+    
     if (data.role === 'admin') {
         switchView('dashboard');
         loadAnggota();
@@ -2511,7 +2534,7 @@ window.addEventListener('load', async () => {
         switchView('absen');
         cekStatusAbsen();
         loadRiwayatAnggota();
-        const hour = new Date().getHours();
+        const hour = parseInt(now.toLocaleString('id-ID', { timeZone: 'Asia/Jakarta', hour: 'numeric', hour12: false }));
         let greet = 'Selamat datang';
         if (hour < 11) greet = 'Selamat pagi';
         else if (hour < 15) greet = 'Selamat siang';
@@ -2522,7 +2545,6 @@ window.addEventListener('load', async () => {
     setInterval(updateJam, 1000);
     updateJam();
     
-    // Setup idle timer
     resetIdleTimer();
     ['click', 'keydown', 'scroll', 'touchstart'].forEach(evt => {
         document.addEventListener(evt, resetIdleTimer, { passive: true });
@@ -2531,14 +2553,12 @@ window.addEventListener('load', async () => {
 
 function updateJam() {
     const now = new Date();
+    const opsJam = { timeZone: 'Asia/Jakarta', hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: false };
+    const opsTgl = { timeZone: 'Asia/Jakarta', weekday: 'long', day: 'numeric', month: 'long', year: 'numeric' };
     const elJam = document.getElementById('jamLive');
     const elTgl = document.getElementById('tanggalLive');
-    if (elJam) elJam.textContent = now.toLocaleTimeString('id-ID');
-    if (elTgl) {
-        elTgl.textContent = now.toLocaleDateString('id-ID', {
-            weekday: 'long', day: 'numeric', month: 'long', year: 'numeric'
-        });
-    }
+    if (elJam) elJam.textContent = now.toLocaleTimeString('id-ID', opsJam);
+    if (elTgl) elTgl.textContent = now.toLocaleDateString('id-ID', opsTgl);
 }
 
 function buildNav() {
@@ -2651,8 +2671,8 @@ async function muatRiwayatEvent() {
         div.innerHTML = `
             <div class="event-icon">${icon}</div>
             <div class="event-content">
-                <div class="title">${e.nama}</div>
-                <div class="desc">${e.pesan}</div>
+                <div class="title">${escapeHtml(e.nama)}</div>
+                <div class="desc">${escapeHtml(e.pesan)}</div>
             </div>
             <div class="event-time">${e.waktu}</div>
         `;
@@ -2681,8 +2701,8 @@ async function loadDashboard() {
             const masuk = a.jam_masuk !== '-' ? `<strong style="color:var(--primary);font-family:'JetBrains Mono',monospace;">${a.jam_masuk}</strong>` : '<span class="muted">-</span>';
             const pulang = a.jam_pulang !== '-' ? `<strong style="color:var(--gold);font-family:'JetBrains Mono',monospace;">${a.jam_pulang}</strong>` : '<span class="muted">-</span>';
             row.innerHTML = `
-                <td data-label="Nama"><strong>${a.nama}</strong></td>
-                <td data-label="Divisi">${a.divisi}</td>
+                <td data-label="Nama"><strong>${escapeHtml(a.nama)}</strong></td>
+                <td data-label="Divisi">${escapeHtml(a.divisi)}</td>
                 <td data-label="Datang" class="center">${masuk}</td>
                 <td data-label="Pulang" class="center">${pulang}</td>
             `;
@@ -2771,7 +2791,7 @@ async function loadAnggota() {
     const sel = document.getElementById('filterAnggotaSemua');
     sel.innerHTML = '<option value="">Semua Anggota</option>';
     anggotaList.forEach(k => {
-        sel.innerHTML += `<option value="${k.id}">${k.nama}</option>`;
+        sel.innerHTML += `<option value="${k.id}">${escapeHtml(k.nama)}</option>`;
     });
 }
 
@@ -2795,7 +2815,7 @@ function renderAnggota() {
     filtered.forEach(k => {
         const row = document.createElement('tr');
         row.innerHTML = `
-            <td data-label="No. Anggota" class="mono">${k.no_anggota || '-'}</td>
+            <td data-label="No. Anggota" class="mono">${escapeHtml(k.no_anggota || '-')}</td>
             <td data-label="Nama"><strong>${escapeHtml(k.nama)}</strong><br><span class="muted mono" style="font-size:11px;">@${escapeHtml(k.username)}</span></td>
             <td data-label="Jabatan">${escapeHtml(k.jabatan)}</td>
             <td data-label="Divisi">${escapeHtml(k.divisi)}</td>
@@ -3011,7 +3031,8 @@ if __name__ == '__main__':
     print(f"  {ORG['desa']}")
     print("=" * 70)
     print()
-    print("  🔒 SECURE VERSION")
+    print("  🔒 SECURE VERSION v3.1")
+    print("  - Waktu WIB (Asia/Jakarta) realtime")
     print("  - Bcrypt password hashing")
     print("  - Rate limiting (5 login/menit)")
     print("  - CSRF protection")
@@ -3025,6 +3046,7 @@ if __name__ == '__main__':
     if IS_PRODUCTION:
         print(f"  Mode     : PRODUCTION")
         print(f"  Port     : {port}")
+        print(f"  Waktu    : {waktu_lengkap_wib()} WIB")
     else:
         import socket
         try:
@@ -3035,6 +3057,7 @@ if __name__ == '__main__':
         except: ip_lokal = "192.168.x.x"
         print(f"  Server          : http://localhost:{port}")
         print(f"  Local Network   : http://{ip_lokal}:{port}")
+        print(f"  Waktu WIB       : {waktu_lengkap_wib()}")
     
     print()
     print("  Tekan CTRL+C untuk menghentikan server")
