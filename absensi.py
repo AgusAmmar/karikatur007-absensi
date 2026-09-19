@@ -35,12 +35,19 @@ ORG = {
 SECRET_KEY = os.environ.get('SECRET_KEY', 'karikatur007-' + hashlib.sha256(str(random.random()).encode()).hexdigest()[:16])
 ADMIN_USERNAME = os.environ.get('ADMIN_USERNAME', 'admin')
 ADMIN_PASSWORD = os.environ.get('ADMIN_PASSWORD', 'admin123')
-IS_PRODUCTION = bool(os.environ.get('RAILWAY_ENVIRONMENT') or os.environ.get('RENDER') or os.environ.get('PRODUCTION'))
+IS_PRODUCTION = bool(
+    os.environ.get('RAILWAY_ENVIRONMENT') or
+    os.environ.get('RAILWAY_STATIC_URL') or
+    os.environ.get('RENDER') or
+    os.environ.get('PRODUCTION') or
+    os.environ.get('DYNO')
+)
 
 app = Flask(__name__)
 app.secret_key = SECRET_KEY
 app.config['SESSION_COOKIE_SAMESITE'] = 'Lax'
-app.config['SESSION_COOKIE_SECURE'] = False
+app.config['SESSION_COOKIE_SECURE'] = bool(IS_PRODUCTION)
+app.config['SESSION_COOKIE_HTTPONLY'] = True
 app.config['PERMANENT_SESSION_LIFETIME'] = timedelta(days=7)
 CORS(app, supports_credentials=True)
 
@@ -108,7 +115,6 @@ def init_db():
         waktu TEXT NOT NULL
     )''')
     
-    # Cek admin — buat hanya kalau belum ada
     c.execute('SELECT COUNT(*) FROM anggota WHERE role = "admin"')
     if c.fetchone()[0] == 0:
         c.execute('''INSERT INTO anggota 
@@ -155,7 +161,7 @@ def admin_required(f):
     @wraps(f)
     def decorated(*args, **kwargs):
         if 'user_id' not in session:
-            return jsonify({'success': False, 'message': 'Belum login'}), 401
+            return jsonify({'success': False, 'message': 'Sesi login habis. Silakan login ulang.'}), 401
         if session.get('role') != 'admin':
             return jsonify({'success': False, 'message': 'Akses ditolak'}), 403
         return f(*args, **kwargs)
@@ -609,8 +615,7 @@ def index():
 
 
 # ============================================================
-# INISIALISASI DATABASE
-# PENTING: dipanggil di tingkat modul supaya gunicorn juga jalan
+# INISIALISASI DATABASE — dipanggil saat modul di-load
 # ============================================================
 init_db()
 
@@ -835,6 +840,7 @@ async function doLogin(e) {
         const res = await fetch('/api/login', {
             method: 'POST',
             headers: {'Content-Type':'application/json'},
+            credentials: 'same-origin',
             body: JSON.stringify({
                 username: document.getElementById('username').value,
                 password: document.getElementById('password').value
@@ -2209,6 +2215,7 @@ let pollingInterval = null;
 
 async function fetchJSON(url, options = {}) {
     try {
+        options.credentials = 'same-origin';
         const res = await fetch(url, options);
         const contentType = res.headers.get('content-type') || '';
         if (!contentType.includes('application/json')) {
@@ -2338,7 +2345,7 @@ async function doLogout() {
     if (!confirm('Yakin mau keluar dari sistem?')) return;
     if (eventSource) eventSource.close();
     if (pollingInterval) clearInterval(pollingInterval);
-    await fetch('/api/logout', {method: 'POST'});
+    await fetch('/api/logout', {method: 'POST', credentials: 'same-origin'});
     window.location.href = '/login';
 }
 
