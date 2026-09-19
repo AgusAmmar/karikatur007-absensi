@@ -2,21 +2,13 @@
 ============================================================
   SISTEM ABSENSI KARANG TARUNA KARIKATUR 007
   Desa Mekarsari RT.07/RW.07
-  Secure Version v3.1 — Fix Waktu WIB
-============================================================
-  Fitur:
-  - Waktu WIB (Asia/Jakarta) realtime
-  - Bcrypt password hashing
-  - Rate limiting login
-  - CSRF protection
-  - Security headers
-  - Auto logout idle 2 jam
-  - Force HTTPS di production
+  Secure Version v3.2 — Fix Import Wraps
 ============================================================
 """
 
 import subprocess, sys, os, sqlite3, webbrowser, threading, time, random, hashlib, csv, io, json, secrets
 from datetime import datetime, timedelta, timezone
+from functools import wraps
 
 # ============================================================
 # SET TIMEZONE KE WIB (Asia/Jakarta)
@@ -51,6 +43,7 @@ from flask_cors import CORS
 from flask_limiter import Limiter
 from flask_limiter.util import get_remote_address
 from werkzeug.middleware.proxy_fix import ProxyFix
+from queue import Queue, Empty
 import bcrypt
 
 # ============================================================
@@ -89,7 +82,6 @@ ORG = {
     'tagline': 'Bersatu · Berkarya · Berdaya'
 }
 
-# SECRET_KEY FIXED — jangan diubah setelah deploy
 SECRET_KEY = os.environ.get('SECRET_KEY', 'karikatur007-fixed-secret-key-2026-aman')
 ADMIN_USERNAME = os.environ.get('ADMIN_USERNAME', 'admin')
 ADMIN_PASSWORD = os.environ.get('ADMIN_PASSWORD', 'Kar1katur007!Mekarsari#2026')
@@ -274,8 +266,6 @@ def init_db():
              waktu_lengkap_wib()))
         print(f"✅ Admin dibuat: {ADMIN_USERNAME}")
         print(f"   Password: {ADMIN_PASSWORD}")
-        if ADMIN_PASSWORD == 'admin123':
-            print("⚠️  PENTING: Ganti password admin setelah login pertama!")
     
     conn.commit()
     conn.close()
@@ -2507,7 +2497,6 @@ window.addEventListener('load', async () => {
     document.getElementById('userAvatar').textContent = data.nama.charAt(0).toUpperCase();
     buildNav();
     
-    // Set bulan default berdasarkan WIB
     const now = new Date();
     const opsBulan = { timeZone: 'Asia/Jakarta', year: 'numeric', month: '2-digit' };
     const parts = new Intl.DateTimeFormat('id-ID', opsBulan).formatToParts(now);
@@ -3031,13 +3020,12 @@ if __name__ == '__main__':
     print(f"  {ORG['desa']}")
     print("=" * 70)
     print()
-    print("  🔒 SECURE VERSION v3.1")
+    print("  🔒 SECURE VERSION v3.2")
     print("  - Waktu WIB (Asia/Jakarta) realtime")
     print("  - Bcrypt password hashing")
-    print("  - Rate limiting (5 login/menit)")
+    print("  - Rate limiting login")
     print("  - CSRF protection")
     print("  - Security headers")
-    print("  - Auto logout idle 2 jam")
     print()
     
     port = int(os.environ.get('PORT', 5000))
