@@ -32,17 +32,15 @@ ORG = {
     'tagline': 'Bersatu · Berkarya · Berdaya'
 }
 
-# Environment variables (untuk hosting)
 SECRET_KEY = os.environ.get('SECRET_KEY', 'karikatur007-' + hashlib.sha256(str(random.random()).encode()).hexdigest()[:16])
 ADMIN_USERNAME = os.environ.get('ADMIN_USERNAME', 'admin')
 ADMIN_PASSWORD = os.environ.get('ADMIN_PASSWORD', 'admin123')
-DATABASE_URL = os.environ.get('DATABASE_URL', '')  # untuk hosting dengan PostgreSQL
-IS_PRODUCTION = os.environ.get('RAILWAY_ENVIRONMENT') or os.environ.get('RENDER') or os.environ.get('PRODUCTION')
+IS_PRODUCTION = bool(os.environ.get('RAILWAY_ENVIRONMENT') or os.environ.get('RENDER') or os.environ.get('PRODUCTION'))
 
 app = Flask(__name__)
 app.secret_key = SECRET_KEY
 app.config['SESSION_COOKIE_SAMESITE'] = 'Lax'
-app.config['SESSION_COOKIE_SECURE'] = bool(IS_PRODUCTION)  # HTTPS di production
+app.config['SESSION_COOKIE_SECURE'] = False
 app.config['PERMANENT_SESSION_LIFETIME'] = timedelta(days=7)
 CORS(app, supports_credentials=True)
 
@@ -71,6 +69,7 @@ def hash_password(password):
     return hashlib.sha256(password.encode()).hexdigest()
 
 def init_db():
+    """Inisialisasi database — dipanggil saat modul di-load"""
     conn = sqlite3.connect(DB_FILE)
     c = conn.cursor()
     
@@ -118,16 +117,11 @@ def init_db():
             ('K007-001', ADMIN_USERNAME, hash_password(ADMIN_PASSWORD), 'Administrator',
              'Ketua', 'Pengurus', 'admin@karikatur007.id', 'admin',
              datetime.now().strftime('%Y-%m-%d %H:%M:%S')))
-        print()
-        print("=" * 70)
-        print(f"  AKUN ADMIN DIBUAT")
-        print(f"  Username: {ADMIN_USERNAME}")
-        print(f"  Password: {ADMIN_PASSWORD}")
-        print(f"  ⚠️  GANTI PASSWORD SETELAH LOGIN PERTAMA!")
-        print("=" * 70)
+        print(f"✅ Admin dibuat: {ADMIN_USERNAME}")
     
     conn.commit()
     conn.close()
+    print(f"✅ Database siap: {DB_FILE}")
 
 def log_event(tipe, anggota_id, nama, pesan):
     waktu = datetime.now().strftime('%H:%M:%S')
@@ -612,6 +606,13 @@ def hapus_anggota(kid):
 @login_required
 def index():
     return render_template_string(MAIN_HTML, o=ORG)
+
+
+# ============================================================
+# INISIALISASI DATABASE
+# PENTING: dipanggil di tingkat modul supaya gunicorn juga jalan
+# ============================================================
+init_db()
 
 
 # ============================================================
@@ -2733,9 +2734,6 @@ if __name__ == '__main__':
     print("=" * 70)
     print()
     
-    init_db()
-    
-    # Baca PORT dari environment (untuk hosting)
     port = int(os.environ.get('PORT', 5000))
     host = '0.0.0.0'
     
