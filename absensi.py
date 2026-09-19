@@ -2,7 +2,7 @@
 ============================================================
   SISTEM ABSENSI KARANG TARUNA KARIKATUR 007
   Desa Mekarsari RT.07/RW.07
-  Production Ready
+  Production Ready v2.0
 ============================================================
 """
 
@@ -34,27 +34,35 @@ ORG = {
     'tagline': 'Bersatu · Berkarya · Berdaya'
 }
 
-SECRET_KEY = os.environ.get('SECRET_KEY', 'karikatur007-' + hashlib.sha256(str(random.random()).encode()).hexdigest()[:16])
+# SECRET_KEY FIXED — jangan diubah setelah deploy!
+# Kalau diubah, semua user harus login ulang.
+SECRET_KEY = os.environ.get('SECRET_KEY', 'karikatur007-fixed-secret-key-2026-jangan-diubah')
+
 ADMIN_USERNAME = os.environ.get('ADMIN_USERNAME', 'admin')
 ADMIN_PASSWORD = os.environ.get('ADMIN_PASSWORD', 'admin123')
+
 IS_PRODUCTION = bool(
     os.environ.get('RAILWAY_ENVIRONMENT') or
     os.environ.get('RAILWAY_STATIC_URL') or
     os.environ.get('RENDER') or
     os.environ.get('PRODUCTION') or
-    os.environ.get('DYNO')
+    os.environ.get('DYNO') or
+    os.environ.get('PORT')  # Railway set PORT
 )
 
 app = Flask(__name__)
 # ProxyFix: supaya Flask tahu dia di belakang proxy HTTPS (Railway)
 app.wsgi_app = ProxyFix(app.wsgi_app, x_for=1, x_proto=1, x_host=1, x_prefix=1)
 app.secret_key = SECRET_KEY
-app.config['SESSION_COOKIE_SAMESITE'] = 'Lax'
-app.config['SESSION_COOKIE_SECURE'] = False
+
+# Cookie config — untuk HTTPS di belakang proxy
+app.config['SESSION_COOKIE_SAMESITE'] = 'None'
+app.config['SESSION_COOKIE_SECURE'] = True
 app.config['SESSION_COOKIE_HTTPONLY'] = True
 app.config['SESSION_COOKIE_DOMAIN'] = None
 app.config['PERMANENT_SESSION_LIFETIME'] = timedelta(days=7)
-CORS(app, supports_credentials=True)
+
+CORS(app, supports_credentials=True, origins='*')
 
 DB_FILE = "absensi_karikatur007.db"
 sse_clients = []
@@ -219,6 +227,27 @@ def api_me():
         'logged_in': True, 'user_id': session['user_id'],
         'username': session['username'], 'nama': session['nama'],
         'role': session['role']
+    })
+
+# ============================================================
+# DEBUG SESSION (untuk troubleshooting)
+# ============================================================
+@app.route('/api/debug/session', methods=['GET'])
+def debug_session():
+    """Debug: cek isi session dan cookie config"""
+    return jsonify({
+        'has_session': bool(session),
+        'session_keys': list(session.keys()),
+        'session_data': dict(session),
+        'secret_key_prefix': SECRET_KEY[:20] + '...',
+        'is_production': IS_PRODUCTION,
+        'cookie_secure': app.config['SESSION_COOKIE_SECURE'],
+        'cookie_samesite': app.config['SESSION_COOKIE_SAMESITE'],
+        'cookie_httponly': app.config['SESSION_COOKIE_HTTPONLY'],
+        'user_agent': request.headers.get('User-Agent', '')[:50],
+        'host': request.host,
+        'scheme': request.scheme,
+        'is_secure': request.is_secure
     })
 
 # ============================================================
