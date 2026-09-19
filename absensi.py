@@ -2,7 +2,7 @@
 ============================================================
   SISTEM ABSENSI KARANG TARUNA KARIKATUR 007
   Desa Mekarsari RT.07/RW.07
-  Secure Version v3.2 — Fix Import Wraps
+  Optimized Black & Gold Edition v5.0
 ============================================================
 """
 
@@ -15,9 +15,9 @@ from functools import wraps
 # ============================================================
 os.environ['TZ'] = 'Asia/Jakarta'
 try:
-    time.tzset()  # Linux/Mac
+    time.tzset()
 except AttributeError:
-    pass  # Windows: pakai fallback manual di sekarang_wib()
+    pass
 
 # Auto-install dependencies
 REQUIRED_PACKAGES = [
@@ -38,7 +38,7 @@ for module_name, pip_name in REQUIRED_PACKAGES:
         except Exception as e:
             print(f"⚠️  Gagal install {pip_name}: {e}")
 
-from flask import Flask, request, jsonify, render_template_string, session, redirect, url_for, send_file, make_response, Response, abort
+from flask import Flask, request, jsonify, render_template_string, session, redirect, url_for, send_file, make_response, Response
 from flask_cors import CORS
 from flask_limiter import Limiter
 from flask_limiter.util import get_remote_address
@@ -50,7 +50,6 @@ import bcrypt
 # FUNGSI WAKTU WIB
 # ============================================================
 def sekarang_wib():
-    """Return datetime WIB (UTC+7) — akurat di lokal & Railway"""
     try:
         from zoneinfo import ZoneInfo
         return datetime.now(ZoneInfo("Asia/Jakarta"))
@@ -59,15 +58,12 @@ def sekarang_wib():
         return utc_now.astimezone(timezone(timedelta(hours=7)))
 
 def tgl_wib():
-    """Return tanggal WIB format YYYY-MM-DD"""
     return sekarang_wib().strftime('%Y-%m-%d')
 
 def jam_wib():
-    """Return jam WIB format HH:MM:SS"""
     return sekarang_wib().strftime('%H:%M:%S')
 
 def waktu_lengkap_wib():
-    """Return datetime WIB format YYYY-MM-DD HH:MM:SS"""
     return sekarang_wib().strftime('%Y-%m-%d %H:%M:%S')
 
 # ============================================================
@@ -98,8 +94,6 @@ IS_PRODUCTION = bool(
 app = Flask(__name__)
 app.wsgi_app = ProxyFix(app.wsgi_app, x_for=1, x_proto=1, x_host=1, x_prefix=1)
 app.secret_key = SECRET_KEY
-
-# Cookie config — aman
 app.config['SESSION_COOKIE_SAMESITE'] = 'None'
 app.config['SESSION_COOKIE_SECURE'] = True
 app.config['SESSION_COOKIE_HTTPONLY'] = True
@@ -107,7 +101,6 @@ app.config['SESSION_COOKIE_DOMAIN'] = None
 app.config['PERMANENT_SESSION_LIFETIME'] = timedelta(hours=2)
 app.config['MAX_CONTENT_LENGTH'] = 5 * 1024 * 1024
 
-# Rate limiter
 limiter = Limiter(
     get_remote_address,
     app=app,
@@ -118,7 +111,7 @@ limiter = Limiter(
 
 CORS(app, supports_credentials=True, origins='*')
 
-DB_FILE = "absensi_karikatur007.db"
+DB_FILE = "absensi_k007_v5.db"
 sse_clients = []
 
 # ============================================================
@@ -133,8 +126,8 @@ def add_security_headers(response):
     response.headers['Permissions-Policy'] = 'geolocation=(), microphone=(), camera=()'
     response.headers['Content-Security-Policy'] = (
         "default-src 'self'; "
-        "style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; "
-        "font-src 'self' https://fonts.gstatic.com data:; "
+        "style-src 'self' 'unsafe-inline'; "
+        "font-src 'self' data:; "
         "script-src 'self' 'unsafe-inline'; "
         "img-src 'self' data:; "
         "connect-src 'self'; "
@@ -142,9 +135,6 @@ def add_security_headers(response):
     )
     return response
 
-# ============================================================
-# FORCE HTTPS DI PRODUCTION
-# ============================================================
 @app.before_request
 def force_https():
     if IS_PRODUCTION and not request.is_secure:
@@ -155,11 +145,6 @@ def force_https():
 # ============================================================
 # CSRF PROTECTION
 # ============================================================
-def generate_csrf_token():
-    if '_csrf_token' not in session:
-        session['_csrf_token'] = secrets.token_urlsafe(32)
-    return session['_csrf_token']
-
 def validate_csrf_token():
     token_from_header = request.headers.get('X-CSRF-Token', '')
     token_from_session = session.get('_csrf_token', '')
@@ -189,7 +174,7 @@ def not_found(e):
 def ratelimit_handler(e):
     if request.path.startswith('/api/'):
         return jsonify({'success': False, 'message': 'Terlalu banyak percobaan. Coba lagi nanti.'}), 429
-    return "Terlalu banyak percobaan. Silakan coba lagi nanti.", 429
+    return "Terlalu banyak percobaan.", 429
 
 @app.errorhandler(500)
 def server_error(e):
@@ -209,8 +194,15 @@ def verify_password(password, hashed):
     except:
         return hashlib.sha256(password.encode()).hexdigest() == hashed
 
+def get_db():
+    """Buat koneksi DB dengan timeout & WAL mode untuk performa"""
+    conn = sqlite3.connect(DB_FILE, timeout=10.0)
+    conn.execute('PRAGMA journal_mode=WAL')
+    conn.execute('PRAGMA synchronous=NORMAL')
+    return conn
+
 def init_db():
-    conn = sqlite3.connect(DB_FILE)
+    conn = get_db()
     c = conn.cursor()
     
     c.execute('''CREATE TABLE IF NOT EXISTS anggota (
@@ -239,6 +231,9 @@ def init_db():
         FOREIGN KEY (anggota_id) REFERENCES anggota(id)
     )''')
     
+    c.execute('CREATE INDEX IF NOT EXISTS idx_absensi_tanggal ON absensi(tanggal)')
+    c.execute('CREATE INDEX IF NOT EXISTS idx_absensi_anggota ON absensi(anggota_id)')
+    
     c.execute('''CREATE TABLE IF NOT EXISTS event_log (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         tipe TEXT NOT NULL,
@@ -265,7 +260,6 @@ def init_db():
              'Ketua', 'Pengurus', 'admin@karikatur007.id', 'admin',
              waktu_lengkap_wib()))
         print(f"✅ Admin dibuat: {ADMIN_USERNAME}")
-        print(f"   Password: {ADMIN_PASSWORD}")
     
     conn.commit()
     conn.close()
@@ -276,8 +270,7 @@ def log_login_attempt(username, berhasil):
         ip = request.remote_addr or 'unknown'
         if request.headers.get('X-Forwarded-For'):
             ip = request.headers.get('X-Forwarded-For').split(',')[0].strip()
-        
-        conn = sqlite3.connect(DB_FILE)
+        conn = get_db()
         c = conn.cursor()
         c.execute('INSERT INTO login_attempts (username, ip_address, berhasil, waktu) VALUES (?, ?, ?, ?)',
                   (username, ip, 1 if berhasil else 0, waktu_lengkap_wib()))
@@ -288,7 +281,7 @@ def log_login_attempt(username, berhasil):
 
 def log_event(tipe, anggota_id, nama, pesan):
     waktu = jam_wib()
-    conn = sqlite3.connect(DB_FILE)
+    conn = get_db()
     c = conn.cursor()
     c.execute('INSERT INTO event_log (tipe, anggota_id, nama, pesan, waktu) VALUES (?, ?, ?, ?, ?)',
               (tipe, anggota_id, nama, pesan, waktu))
@@ -345,7 +338,7 @@ def api_login():
         if not username or not password:
             return jsonify({'success': False, 'message': 'Username dan password wajib diisi'})
         
-        conn = sqlite3.connect(DB_FILE)
+        conn = get_db()
         c = conn.cursor()
         c.execute('SELECT id, username, nama, role, aktif, password FROM anggota WHERE username = ?', (username,))
         row = c.fetchone()
@@ -353,12 +346,12 @@ def api_login():
         
         if not row:
             log_login_attempt(username, False)
-            time.sleep(0.5)
+            time.sleep(0.3)
             return jsonify({'success': False, 'message': 'Username atau password salah'})
         
         if not verify_password(password, row[5]):
             log_login_attempt(username, False)
-            time.sleep(0.5)
+            time.sleep(0.3)
             return jsonify({'success': False, 'message': 'Username atau password salah'})
         
         if not row[4]:
@@ -398,7 +391,7 @@ def api_me():
     })
 
 # ============================================================
-# API ABSENSI — PAKAI WAKTU WIB
+# API ABSENSI
 # ============================================================
 @app.route('/api/absensi/status', methods=['GET'])
 def absensi_status():
@@ -406,7 +399,7 @@ def absensi_status():
         return jsonify({'success': False}), 401
     user_id = session['user_id']
     today = tgl_wib()
-    conn = sqlite3.connect(DB_FILE)
+    conn = get_db()
     c = conn.cursor()
     c.execute('SELECT id, jam_masuk, jam_pulang, status FROM absensi WHERE anggota_id = ? AND tanggal = ?',
               (user_id, today))
@@ -429,7 +422,7 @@ def absensi_masuk():
     data = request.get_json() or {}
     kegiatan = str(data.get('kegiatan', ''))[:200]
     
-    conn = sqlite3.connect(DB_FILE)
+    conn = get_db()
     c = conn.cursor()
     c.execute('SELECT id, jam_masuk FROM absensi WHERE anggota_id = ? AND tanggal = ?', (user_id, today))
     row = c.fetchone()
@@ -454,7 +447,7 @@ def absensi_pulang():
     today = tgl_wib()
     now = jam_wib()
     
-    conn = sqlite3.connect(DB_FILE)
+    conn = get_db()
     c = conn.cursor()
     c.execute('SELECT id, jam_masuk, jam_pulang FROM absensi WHERE anggota_id = ? AND tanggal = ?', (user_id, today))
     row = c.fetchone()
@@ -481,7 +474,7 @@ def absensi_riwayat():
         bulan = sekarang_wib().strftime('%Y-%m')
     filter_user = request.args.get('user_id')
     
-    conn = sqlite3.connect(DB_FILE)
+    conn = get_db()
     c = conn.cursor()
     if role == 'admin' and filter_user:
         try:
@@ -518,20 +511,27 @@ def absensi_riwayat():
 
 @app.route('/api/absensi/hari-ini', methods=['GET'])
 def absensi_hari_ini():
+    """Ambil absen hari ini dengan fallback UTC untuk data lama"""
     if 'user_id' not in session or session.get('role') != 'admin':
         return jsonify([]), 403
-    today = tgl_wib()
-    conn = sqlite3.connect(DB_FILE)
+    
+    today_wib = tgl_wib()
+    now_wib = sekarang_wib()
+    today_utc = now_wib.astimezone(timezone.utc).strftime('%Y-%m-%d')
+    yesterday_wib = (now_wib - timedelta(days=1)).strftime('%Y-%m-%d')
+    
+    conn = get_db()
     c = conn.cursor()
-    c.execute('''SELECT a.id, k.nama, k.jabatan, k.divisi, a.jam_masuk, a.jam_pulang, a.status
+    c.execute('''SELECT a.id, k.nama, k.jabatan, k.divisi, a.jam_masuk, a.jam_pulang, a.status, a.tanggal
                  FROM absensi a JOIN anggota k ON a.anggota_id = k.id
-                 WHERE a.tanggal = ? AND a.jam_masuk IS NOT NULL
-                 ORDER BY a.jam_masuk DESC''', (today,))
+                 WHERE (a.tanggal = ? OR a.tanggal = ? OR a.tanggal = ?) 
+                 AND a.jam_masuk IS NOT NULL
+                 ORDER BY a.jam_masuk DESC''', (today_wib, today_utc, yesterday_wib))
     rows = c.fetchall()
     conn.close()
     return jsonify([{
         'id': r[0], 'nama': r[1], 'jabatan': r[2], 'divisi': r[3],
-        'jam_masuk': r[4] or '-', 'jam_pulang': r[5] or '-', 'status': r[6]
+        'jam_masuk': r[4] or '-', 'jam_pulang': r[5] or '-', 'status': r[6], 'tanggal': r[7]
     } for r in rows])
 
 # ============================================================
@@ -548,7 +548,7 @@ def sse_events():
             yield f"data: {json.dumps({'tipe':'connected'})}\n\n"
             while True:
                 try:
-                    event = q.get(timeout=20)
+                    event = q.get(timeout=25)
                     yield f"data: {json.dumps(event)}\n\n"
                 except Empty:
                     yield f"data: {json.dumps({'tipe':'heartbeat'})}\n\n"
@@ -564,7 +564,7 @@ def sse_events():
 def events_riwayat():
     if 'user_id' not in session:
         return jsonify([]), 401
-    conn = sqlite3.connect(DB_FILE)
+    conn = get_db()
     c = conn.cursor()
     c.execute('SELECT tipe, nama, pesan, waktu FROM event_log ORDER BY id DESC LIMIT 15')
     rows = c.fetchall()
@@ -582,7 +582,7 @@ def api_rekap():
     if len(bulan) != 7:
         bulan = sekarang_wib().strftime('%Y-%m')
     
-    conn = sqlite3.connect(DB_FILE)
+    conn = get_db()
     c = conn.cursor()
     c.execute('SELECT id, nama, jabatan, divisi FROM anggota WHERE aktif = 1 ORDER BY nama')
     anggota_list = c.fetchall()
@@ -594,6 +594,7 @@ def api_rekap():
             if tgl.weekday() != 6:
                 hari_kerja += 1
         except: break
+    
     rekap = []
     for k in anggota_list:
         kid, nama, jabatan, divisi = k
@@ -623,7 +624,7 @@ def export_csv():
     bulan = request.args.get('bulan', sekarang_wib().strftime('%Y-%m'))
     if len(bulan) != 7:
         bulan = sekarang_wib().strftime('%Y-%m')
-    conn = sqlite3.connect(DB_FILE)
+    conn = get_db()
     c = conn.cursor()
     c.execute('''SELECT k.no_anggota, k.nama, k.jabatan, k.divisi, a.tanggal, a.jam_masuk, a.jam_pulang, a.status
                  FROM absensi a JOIN anggota k ON a.anggota_id = k.id
@@ -648,7 +649,7 @@ def export_pdf():
     bulan = request.args.get('bulan', sekarang_wib().strftime('%Y-%m'))
     if len(bulan) != 7:
         bulan = sekarang_wib().strftime('%Y-%m')
-    conn = sqlite3.connect(DB_FILE)
+    conn = get_db()
     c = conn.cursor()
     c.execute('''SELECT k.no_anggota, k.nama, k.jabatan, k.divisi, a.tanggal, a.jam_masuk, a.jam_pulang, a.status
                  FROM absensi a JOIN anggota k ON a.anggota_id = k.id
@@ -666,23 +667,23 @@ def export_pdf():
     @page {{ margin: 20mm; }}
     * {{ margin:0; padding:0; box-sizing:border-box; font-family:'Helvetica','Arial',sans-serif; }}
     body {{ padding:30px; color:#111827; font-size:12px; }}
-    .header {{ border-bottom:2px solid #064e3b; padding-bottom:15px; margin-bottom:20px; text-align:center; }}
-    .header h1 {{ font-size:20px; letter-spacing:3px; margin-bottom:4px; color:#064e3b; }}
+    .header {{ border-bottom:2px solid #b45309; padding-bottom:15px; margin-bottom:20px; text-align:center; }}
+    .header h1 {{ font-size:20px; letter-spacing:3px; margin-bottom:4px; color:#b45309; }}
     .header .sub {{ font-size:11px; color:#6b7280; }}
     .header .loc {{ font-size:10px; color:#9ca3af; margin-top:2px; }}
     .doc-title {{ text-align:center; margin-bottom:20px; }}
     .doc-title h2 {{ font-size:13px; letter-spacing:2px; margin-bottom:4px; }}
     .doc-title .sub {{ font-size:11px; color:#6b7280; }}
-    .meta {{ display:flex; gap:30px; margin-bottom:18px; padding:10px 14px; background:#f0fdf4; border-left:3px solid #064e3b; }}
+    .meta {{ display:flex; gap:30px; margin-bottom:18px; padding:10px 14px; background:#fef3c7; border-left:3px solid #b45309; }}
     .meta .label {{ font-size:9px; color:#6b7280; text-transform:uppercase; letter-spacing:1px; margin-bottom:2px; }}
     .meta .value {{ font-size:12px; font-weight:700; }}
     table {{ width:100%; border-collapse:collapse; }}
-    th {{ background:#064e3b; color:white; padding:9px 8px; text-align:left; font-size:9px; text-transform:uppercase; font-weight:600; letter-spacing:0.5px; }}
+    th {{ background:#111827; color:#fbbf24; padding:9px 8px; text-align:left; font-size:9px; text-transform:uppercase; font-weight:600; letter-spacing:0.5px; }}
     td {{ padding:7px 8px; border-bottom:1px solid #e5e7eb; font-size:10.5px; }}
     tr:nth-child(even) td {{ background:#f9fafb; }}
     .center {{ text-align:center; }}
     .footer {{ margin-top:30px; padding-top:12px; border-top:1px solid #e5e7eb; display:flex; justify-content:space-between; font-size:9px; color:#9ca3af; }}
-    .btn-print {{ position:fixed; top:20px; right:20px; background:#064e3b; color:white; padding:10px 18px; border:none; border-radius:3px; font-size:11px; font-weight:600; cursor:pointer; }}
+    .btn-print {{ position:fixed; top:20px; right:20px; background:#111827; color:#fbbf24; padding:10px 18px; border:none; border-radius:3px; font-size:11px; font-weight:600; cursor:pointer; }}
     @media print {{ body {{ padding:0; }} .no-print {{ display:none !important; }} }}
 </style></head><body>
 <button class="btn-print no-print" onclick="window.print()">PRINT / SAVE PDF</button>
@@ -726,7 +727,7 @@ def export_pdf():
 def get_anggota():
     if 'user_id' not in session:
         return jsonify([]), 401
-    conn = sqlite3.connect(DB_FILE)
+    conn = get_db()
     c = conn.cursor()
     c.execute('SELECT id, no_anggota, username, nama, jabatan, divisi, email, no_hp, role, aktif FROM anggota ORDER BY nama')
     rows = c.fetchall()
@@ -757,7 +758,7 @@ def tambah_anggota():
         return jsonify({'success': False, 'message': 'Username minimal 3 karakter'})
     
     try:
-        conn = sqlite3.connect(DB_FILE)
+        conn = get_db()
         c = conn.cursor()
         if not no_anggota:
             c.execute('SELECT COUNT(*) FROM anggota WHERE role = "anggota"')
@@ -791,7 +792,7 @@ def edit_anggota(kid):
     if password and len(password) < 6:
         return jsonify({'success': False, 'message': 'Password minimal 6 karakter'})
     
-    conn = sqlite3.connect(DB_FILE)
+    conn = get_db()
     c = conn.cursor()
     if password:
         c.execute('''UPDATE anggota SET nama=?, jabatan=?, divisi=?, email=?, no_hp=?, aktif=?, password=? WHERE id=?''',
@@ -808,7 +809,7 @@ def edit_anggota(kid):
 def hapus_anggota(kid):
     if kid == session['user_id']:
         return jsonify({'success': False, 'message': 'Tidak dapat menghapus akun sendiri'})
-    conn = sqlite3.connect(DB_FILE)
+    conn = get_db()
     c = conn.cursor()
     c.execute('DELETE FROM absensi WHERE anggota_id = ?', (kid,))
     c.execute('DELETE FROM anggota WHERE id = ?', (kid,))
@@ -832,7 +833,7 @@ init_db()
 
 
 # ============================================================
-# LOGIN PAGE
+# LOGIN PAGE — BLACK & GOLD (NO EXTERNAL FONTS)
 # ============================================================
 LOGIN_HTML = r"""
 <!DOCTYPE html>
@@ -841,16 +842,17 @@ LOGIN_HTML = r"""
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
 <title>Masuk — {{ o.nama }}</title>
-<link rel="preconnect" href="https://fonts.googleapis.com">
-<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-<link href="https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;600&display=swap" rel="stylesheet">
 <style>
 * { margin:0; padding:0; box-sizing:border-box; }
 html, body { height:100%; }
 body {
-    font-family: 'Plus Jakarta Sans', -apple-system, BlinkMacSystemFont, sans-serif;
-    background: #f8fafc;
-    color: #0f172a;
+    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif;
+    background: #0a0a0a;
+    background-image: 
+        radial-gradient(circle at 20% 30%, rgba(180, 83, 9, 0.08) 0%, transparent 50%),
+        radial-gradient(circle at 80% 70%, rgba(180, 83, 9, 0.06) 0%, transparent 50%),
+        linear-gradient(180deg, #0a0a0a 0%, #111111 100%);
+    color: #e5e7eb;
     font-size: 14px;
     display: flex;
     align-items: center;
@@ -865,144 +867,187 @@ body::before {
     position: fixed;
     inset: 0;
     background-image: 
-        linear-gradient(rgba(6,78,59,0.03) 1px, transparent 1px),
-        linear-gradient(90deg, rgba(6,78,59,0.03) 1px, transparent 1px);
-    background-size: 24px 24px;
+        linear-gradient(rgba(251,191,36,0.02) 1px, transparent 1px),
+        linear-gradient(90deg, rgba(251,191,36,0.02) 1px, transparent 1px);
+    background-size: 32px 32px;
     pointer-events: none;
 }
-.login-container { width: 100%; max-width: 420px; position: relative; z-index: 1; }
+
+.login-container { width: 100%; max-width: 440px; position: relative; z-index: 1; }
+
 .org-header {
     text-align: center;
-    margin-bottom: 24px;
-    padding-bottom: 20px;
-    border-bottom: 1px solid #e2e8f0;
+    margin-bottom: 28px;
 }
 .org-badge {
     display: inline-block;
-    padding: 6px 14px;
-    background: #064e3b;
-    color: #ffffff;
-    border-radius: 4px;
+    padding: 6px 18px;
+    background: transparent;
+    border: 1px solid #b45309;
+    color: #fbbf24;
+    border-radius: 3px;
     font-size: 10px;
     font-weight: 700;
-    letter-spacing: 2px;
+    letter-spacing: 3px;
     text-transform: uppercase;
-    margin-bottom: 12px;
+    margin-bottom: 16px;
 }
 .org-name {
-    font-size: 28px;
+    font-family: Georgia, 'Times New Roman', serif;
+    font-size: 42px;
     font-weight: 800;
-    color: #064e3b;
+    background: linear-gradient(135deg, #fbbf24 0%, #d97706 50%, #fbbf24 100%);
+    -webkit-background-clip: text;
+    -webkit-text-fill-color: transparent;
+    background-clip: text;
     letter-spacing: 2px;
-    line-height: 1.1;
-    margin-bottom: 6px;
+    line-height: 1.05;
+    margin-bottom: 8px;
+}
+.org-divider {
+    width: 60px;
+    height: 2px;
+    background: linear-gradient(90deg, transparent, #b45309, transparent);
+    margin: 12px auto;
 }
 .org-type {
-    font-size: 12px;
-    color: #475569;
-    letter-spacing: 1px;
+    font-size: 11px;
+    color: #9ca3af;
+    letter-spacing: 2px;
     text-transform: uppercase;
     font-weight: 600;
-    margin-bottom: 4px;
+    margin-bottom: 6px;
 }
 .org-loc {
     font-size: 11px;
-    color: #94a3b8;
-    letter-spacing: 0.5px;
-    font-weight: 500;
+    color: #6b7280;
+    letter-spacing: 1px;
 }
+
 .login-card {
-    background: white;
-    border: 1px solid #e2e8f0;
-    border-radius: 8px;
-    padding: 28px 26px;
-    box-shadow: 0 1px 3px rgba(0,0,0,0.04), 0 8px 24px -8px rgba(6,78,59,0.08);
+    background: linear-gradient(145deg, #161616 0%, #0f0f0f 100%);
+    border: 1px solid #262626;
+    border-radius: 12px;
+    padding: 32px 28px;
+    box-shadow: 
+        0 0 0 1px rgba(251,191,36,0.05),
+        0 20px 60px -20px rgba(0,0,0,0.8),
+        0 0 80px -20px rgba(180,83,9,0.15);
+    position: relative;
 }
+.login-card::before {
+    content: '';
+    position: absolute;
+    top: -1px;
+    left: 30%;
+    right: 30%;
+    height: 1px;
+    background: linear-gradient(90deg, transparent, #b45309, transparent);
+}
+
 .login-title {
-    font-size: 17px;
+    font-size: 20px;
     font-weight: 700;
-    color: #0f172a;
-    margin-bottom: 4px;
+    color: #f9fafb;
+    margin-bottom: 6px;
+    font-family: Georgia, serif;
+    letter-spacing: 0.5px;
 }
 .login-desc {
-    font-size: 12px;
-    color: #64748b;
-    margin-bottom: 22px;
-    line-height: 1.55;
+    font-size: 12.5px;
+    color: #9ca3af;
+    margin-bottom: 26px;
+    line-height: 1.6;
 }
-.form-row { margin-bottom: 16px; }
+
+.form-row { margin-bottom: 18px; }
 .form-row label {
     display: block;
     font-size: 10.5px;
     font-weight: 700;
-    color: #334155;
+    color: #fbbf24;
     text-transform: uppercase;
-    letter-spacing: 1px;
-    margin-bottom: 7px;
+    letter-spacing: 1.5px;
+    margin-bottom: 8px;
 }
 .form-row input {
     width: 100%;
-    padding: 12px 14px;
-    border: 1.5px solid #cbd5e1;
+    padding: 13px 16px;
+    border: 1px solid #262626;
     border-radius: 6px;
-    font-size: 13.5px;
-    font-family: 'Plus Jakarta Sans', sans-serif;
+    font-size: 14px;
+    font-family: inherit;
     outline: none;
-    transition: all 0.15s;
-    background: #f8fafc;
-    color: #0f172a;
+    transition: all 0.2s;
+    background: #0a0a0a;
+    color: #f9fafb;
 }
 .form-row input:focus {
-    border-color: #064e3b;
-    background: white;
-    box-shadow: 0 0 0 3px rgba(6,78,59,0.1);
+    border-color: #b45309;
+    background: #0f0f0f;
+    box-shadow: 0 0 0 3px rgba(180,83,9,0.15);
 }
-.form-row input::placeholder { color: #94a3b8; }
+.form-row input::placeholder { color: #4b5563; }
+
 .btn-submit {
     width: 100%;
-    padding: 13px;
-    background: #064e3b;
-    color: white;
+    padding: 14px;
+    background: linear-gradient(135deg, #fbbf24 0%, #b45309 100%);
+    color: #0a0a0a;
     border: none;
     border-radius: 6px;
-    font-size: 12.5px;
-    font-weight: 700;
+    font-size: 13px;
+    font-weight: 800;
     text-transform: uppercase;
-    letter-spacing: 1.5px;
+    letter-spacing: 2px;
     cursor: pointer;
-    transition: all 0.15s;
-    font-family: 'Plus Jakarta Sans', sans-serif;
-    min-height: 46px;
+    transition: all 0.2s;
+    font-family: inherit;
+    min-height: 48px;
+    box-shadow: 0 4px 20px -4px rgba(251,191,36,0.4);
 }
-.btn-submit:hover { background: #065f46; }
-.btn-submit:active { transform: scale(0.99); }
-.btn-submit:disabled { background: #94a3b8; cursor: not-allowed; }
+.btn-submit:hover {
+    background: linear-gradient(135deg, #fcd34d 0%, #d97706 100%);
+    box-shadow: 0 6px 24px -4px rgba(251,191,36,0.6);
+    transform: translateY(-1px);
+}
+.btn-submit:active { transform: translateY(0); }
+.btn-submit:disabled { 
+    background: #374151; 
+    color: #6b7280;
+    box-shadow: none;
+    cursor: not-allowed;
+    transform: none;
+}
+
 .error-msg {
-    background: #fef2f2;
-    border: 1px solid #fecaca;
+    background: rgba(220,38,38,0.1);
+    border: 1px solid rgba(220,38,38,0.3);
     border-left: 3px solid #dc2626;
-    color: #991b1b;
-    padding: 11px 13px;
+    color: #fca5a5;
+    padding: 12px 14px;
     border-radius: 6px;
-    font-size: 12px;
-    margin-bottom: 16px;
+    font-size: 12.5px;
+    margin-bottom: 18px;
     display: none;
     line-height: 1.5;
 }
 .error-msg.show { display: block; }
+
 .footer-text {
     text-align: center;
-    margin-top: 24px;
-    font-size: 10px;
-    color: #94a3b8;
-    letter-spacing: 0.5px;
+    margin-top: 28px;
+    font-size: 10.5px;
+    color: #4b5563;
+    letter-spacing: 1px;
     line-height: 1.8;
 }
-.footer-text .sep { padding: 0 6px; }
+.footer-text .sep { padding: 0 8px; color: #b45309; }
+
 @media (max-width: 480px) {
     body { padding: 16px; }
-    .login-card { padding: 24px 20px; }
-    .org-name { font-size: 24px; letter-spacing: 1.5px; }
+    .org-name { font-size: 34px; }
+    .login-card { padding: 26px 20px; }
 }
 </style>
 </head>
@@ -1011,6 +1056,7 @@ body::before {
     <div class="org-header">
         <div class="org-badge">KARANG TARUNA</div>
         <div class="org-name">{{ o.nama }}</div>
+        <div class="org-divider"></div>
         <div class="org-type">{{ o.tagline }}</div>
         <div class="org-loc">{{ o.wilayah }} · {{ o.desa }}</div>
     </div>
@@ -1035,7 +1081,7 @@ body::before {
     </div>
     
     <div class="footer-text">
-        {{ o.sistem }}<span class="sep">·</span>{{ o.nama }} &copy; {{ o.desa }}
+        {{ o.sistem }}<span class="sep">·</span>{{ o.nama }}<span class="sep">·</span>{{ o.desa }}
     </div>
 </div>
 
@@ -1100,7 +1146,7 @@ async function doLogin(e) {
 
 
 # ============================================================
-# MAIN PAGE
+# MAIN PAGE — BLACK & GOLD (OPTIMIZED)
 # ============================================================
 MAIN_HTML = r"""
 <!DOCTYPE html>
@@ -1109,46 +1155,43 @@ MAIN_HTML = r"""
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
 <title>{{ o.nama }} — {{ o.sistem }}</title>
-<link rel="preconnect" href="https://fonts.googleapis.com">
-<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-<link href="https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;600&display=swap" rel="stylesheet">
 <style>
 :root {
-    --primary: #064e3b;
-    --primary-dark: #053d2e;
-    --primary-light: #065f46;
-    --primary-50: #f0fdf4;
-    --primary-100: #dcfce7;
-    --primary-200: #bbf7d0;
-    --gold: #b45309;
-    --gold-light: #fef3c7;
-    --gray-50: #f8fafc;
-    --gray-100: #f1f5f9;
-    --gray-200: #e2e8f0;
-    --gray-300: #cbd5e1;
-    --gray-400: #94a3b8;
-    --gray-500: #64748b;
-    --gray-600: #475569;
-    --gray-700: #334155;
-    --gray-800: #1e293b;
-    --gray-900: #0f172a;
-    --red: #b91c1c;
-    --red-bg: #fef2f2;
-    --amber: #b45309;
-    --amber-bg: #fffbeb;
-    --blue: #1e40af;
-    --blue-bg: #eff6ff;
-    --purple: #6d28d9;
-    --purple-bg: #f5f3ff;
+    --black-900: #0a0a0a;
+    --black-800: #111111;
+    --black-700: #161616;
+    --black-600: #1a1a1a;
+    --black-500: #1f1f1f;
+    --gold-500: #fbbf24;
+    --gold-600: #d97706;
+    --gold-700: #b45309;
+    --gold-800: #92400e;
+    --gold-50: #fef3c7;
+    --border-dark: #262626;
+    --border-mid: #333333;
+    --text-primary: #f9fafb;
+    --text-secondary: #d1d5db;
+    --text-muted: #9ca3af;
+    --text-dim: #6b7280;
+    --success: #10b981;
+    --success-bg: rgba(16,185,129,0.1);
+    --danger: #ef4444;
+    --danger-bg: rgba(239,68,68,0.1);
+    --warning: #f59e0b;
+    --warning-bg: rgba(245,158,11,0.1);
+    --info: #3b82f6;
+    --info-bg: rgba(59,130,246,0.1);
+    --purple: #a78bfa;
+    --purple-bg: rgba(167,139,250,0.1);
     --safe-top: env(safe-area-inset-top, 0px);
     --safe-bottom: env(safe-area-inset-bottom, 0px);
 }
 * { margin:0; padding:0; box-sizing:border-box; -webkit-tap-highlight-color:transparent; }
 html, body { height: 100%; overscroll-behavior: none; }
 body {
-    font-family: 'Plus Jakarta Sans', -apple-system, BlinkMacSystemFont, sans-serif;
-    background: var(--gray-100);
-    color: var(--gray-900);
+    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif;
+    background: var(--black-900);
+    color: var(--text-secondary);
     font-size: 13px;
     line-height: 1.5;
     display: flex;
@@ -1158,33 +1201,43 @@ body {
     height: 100vh;
     height: 100dvh;
 }
+
 .app-header {
-    background: var(--primary);
+    background: var(--black-800);
     color: white;
     display: flex;
     align-items: center;
-    height: 60px;
+    height: 64px;
     flex-shrink: 0;
     padding: 0 20px;
     gap: 16px;
-    border-bottom: 2px solid var(--gold);
+    border-bottom: 1px solid var(--border-dark);
+    position: relative;
     padding-top: var(--safe-top);
-    height: calc(60px + var(--safe-top));
+    height: calc(64px + var(--safe-top));
+}
+.app-header::after {
+    content: '';
+    position: absolute;
+    bottom: -1px;
+    left: 0; right: 0;
+    height: 1px;
+    background: linear-gradient(90deg, transparent, var(--gold-700), transparent);
 }
 .app-brand {
     display: flex;
     align-items: center;
     gap: 12px;
     padding-right: 20px;
-    border-right: 1px solid rgba(255,255,255,0.15);
+    border-right: 1px solid var(--border-dark);
     height: 60%;
     flex-shrink: 0;
 }
 .app-brand .monogram {
-    width: 36px;
-    height: 36px;
-    border: 1.5px solid var(--gold);
-    color: var(--gold);
+    width: 38px;
+    height: 38px;
+    border: 1.5px solid var(--gold-600);
+    color: var(--gold-500);
     border-radius: 6px;
     display: flex;
     align-items: center;
@@ -1193,21 +1246,26 @@ body {
     font-size: 12px;
     letter-spacing: 0.5px;
     flex-shrink: 0;
-    font-family: 'JetBrains Mono', monospace;
+    font-family: 'SF Mono', Consolas, 'Courier New', monospace;
+    background: rgba(180,83,9,0.08);
 }
 .app-brand .text { line-height: 1.15; min-width: 0; }
 .app-brand .name {
-    font-size: 12px;
-    font-weight: 800;
-    letter-spacing: 1.8px;
-    text-transform: uppercase;
+    font-family: Georgia, serif;
+    font-size: 14px;
+    font-weight: 700;
+    background: linear-gradient(135deg, #fbbf24 0%, #d97706 100%);
+    -webkit-background-clip: text;
+    -webkit-text-fill-color: transparent;
+    background-clip: text;
+    letter-spacing: 1.5px;
     white-space: nowrap;
 }
 .app-brand .sub {
     font-size: 9px;
-    color: rgba(255,255,255,0.6);
+    color: var(--text-dim);
     text-transform: uppercase;
-    letter-spacing: 1px;
+    letter-spacing: 1.2px;
     white-space: nowrap;
     font-weight: 500;
 }
@@ -1226,23 +1284,26 @@ body {
     padding: 0 18px;
     background: transparent;
     border: none;
-    color: rgba(255,255,255,0.65);
+    color: var(--text-dim);
     font-size: 12px;
     font-weight: 600;
     cursor: pointer;
     transition: all 0.15s;
-    font-family: 'Plus Jakarta Sans', sans-serif;
+    font-family: inherit;
     letter-spacing: 0.4px;
-    border-bottom: 3px solid transparent;
-    margin-bottom: -2px;
+    border-bottom: 2px solid transparent;
+    margin-bottom: -1px;
     display: flex;
     align-items: center;
     gap: 8px;
     white-space: nowrap;
     flex-shrink: 0;
 }
-.nav-item:hover { color: white; }
-.nav-item.active { color: white; border-bottom-color: var(--gold); }
+.nav-item:hover { color: var(--gold-500); }
+.nav-item.active { 
+    color: var(--gold-500);
+    border-bottom-color: var(--gold-600);
+}
 .nav-item svg { flex-shrink: 0; }
 .app-user {
     display: flex;
@@ -1251,43 +1312,50 @@ body {
     flex-shrink: 0;
 }
 .app-user .info { text-align: right; line-height: 1.2; }
-.app-user .info .name { font-size: 12px; font-weight: 700; white-space: nowrap; }
+.app-user .info .name { font-size: 12px; font-weight: 700; color: var(--text-primary); white-space: nowrap; }
 .app-user .info .role {
     font-size: 9.5px;
-    color: rgba(255,255,255,0.6);
+    color: var(--gold-600);
     text-transform: uppercase;
-    font-weight: 600;
-    letter-spacing: 0.5px;
+    font-weight: 700;
+    letter-spacing: 0.8px;
 }
 .app-user .avatar {
-    width: 34px;
-    height: 34px;
-    background: var(--gold);
-    color: var(--primary);
+    width: 36px;
+    height: 36px;
+    background: linear-gradient(135deg, var(--gold-500), var(--gold-700));
+    color: var(--black-900);
     border-radius: 50%;
     display: flex;
     align-items: center;
     justify-content: center;
-    font-weight: 800;
-    font-size: 13px;
+    font-weight: 900;
+    font-size: 14px;
     flex-shrink: 0;
+    box-shadow: 0 0 0 2px rgba(180,83,9,0.2);
 }
 .btn-logout {
     background: transparent;
-    border: 1px solid rgba(255,255,255,0.25);
-    color: rgba(255,255,255,0.85);
-    padding: 6px 12px;
+    border: 1px solid var(--border-mid);
+    color: var(--text-muted);
+    padding: 7px 14px;
     border-radius: 4px;
     cursor: pointer;
     font-size: 10.5px;
     font-weight: 700;
-    letter-spacing: 0.8px;
-    font-family: 'Plus Jakarta Sans', sans-serif;
+    letter-spacing: 1px;
+    font-family: inherit;
     text-transform: uppercase;
     min-height: 32px;
     flex-shrink: 0;
+    transition: all 0.15s;
 }
-.btn-logout:hover { background: rgba(255,255,255,0.1); border-color: rgba(255,255,255,0.5); color: white; }
+.btn-logout:hover { 
+    background: rgba(180,83,9,0.1);
+    border-color: var(--gold-600);
+    color: var(--gold-500);
+}
+
 .app-main {
     flex: 1;
     overflow: hidden;
@@ -1308,141 +1376,164 @@ body {
     display: flex;
     flex-direction: column;
     gap: 16px;
-    max-width: 1360px;
+    max-width: 1400px;
     margin: 0 auto;
     width: 100%;
     min-height: 100%;
 }
+
 .page-header {
     display: flex;
     justify-content: space-between;
     align-items: flex-start;
     gap: 12px;
     flex-wrap: wrap;
-    padding-bottom: 14px;
-    border-bottom: 1px solid var(--gray-200);
+    padding-bottom: 16px;
+    border-bottom: 1px solid var(--border-dark);
+    position: relative;
+}
+.page-header::after {
+    content: '';
+    position: absolute;
+    bottom: -1px;
+    left: 0;
+    width: 80px;
+    height: 2px;
+    background: linear-gradient(90deg, var(--gold-600), transparent);
 }
 .page-header .titles { min-width: 0; flex: 1; }
 .page-header .titles .eyebrow {
     font-size: 10px;
-    color: var(--primary);
+    color: var(--gold-600);
     text-transform: uppercase;
-    letter-spacing: 1.5px;
-    font-weight: 700;
+    letter-spacing: 2px;
+    font-weight: 800;
     margin-bottom: 4px;
 }
 .page-header .titles h1 {
-    font-size: 20px;
-    font-weight: 800;
-    color: var(--gray-900);
-    letter-spacing: -0.3px;
-    margin-bottom: 3px;
+    font-family: Georgia, serif;
+    font-size: 26px;
+    font-weight: 700;
+    color: var(--text-primary);
+    letter-spacing: 0.5px;
+    margin-bottom: 4px;
 }
 .page-header .titles .subtitle {
-    font-size: 11.5px;
-    color: var(--gray-500);
+    font-size: 12px;
+    color: var(--text-muted);
 }
+
 .greeting {
-    background: white;
-    border: 1px solid var(--gray-200);
-    border-left: 4px solid var(--primary);
-    padding: 16px 20px;
-    border-radius: 6px;
+    background: linear-gradient(135deg, var(--black-700) 0%, var(--black-800) 100%);
+    border: 1px solid var(--border-dark);
+    border-left: 3px solid var(--gold-600);
+    padding: 18px 22px;
+    border-radius: 8px;
     display: flex;
     align-items: center;
-    gap: 14px;
+    gap: 16px;
 }
 .greeting .icon {
-    width: 42px;
-    height: 42px;
-    background: var(--primary-50);
-    color: var(--primary);
-    border-radius: 8px;
+    width: 46px;
+    height: 46px;
+    background: rgba(180,83,9,0.1);
+    border: 1px solid var(--gold-700);
+    color: var(--gold-500);
+    border-radius: 10px;
     display: flex;
     align-items: center;
     justify-content: center;
     flex-shrink: 0;
-    font-size: 20px;
+    font-size: 22px;
 }
 .greeting .content h2 {
-    font-size: 14px;
+    font-size: 15px;
     font-weight: 700;
-    color: var(--gray-900);
+    color: var(--text-primary);
     margin-bottom: 2px;
 }
 .greeting .content p {
-    font-size: 11.5px;
-    color: var(--gray-500);
+    font-size: 12px;
+    color: var(--text-muted);
 }
+
 .clock-card {
-    background: var(--primary);
+    background: linear-gradient(135deg, var(--black-700) 0%, var(--black-800) 100%);
     color: white;
-    padding: 28px 26px;
-    border-radius: 6px;
+    padding: 32px 28px;
+    border-radius: 10px;
     position: relative;
     overflow: hidden;
-    border-bottom: 3px solid var(--gold);
+    border: 1px solid var(--border-dark);
+    border-bottom: 3px solid var(--gold-600);
+    box-shadow: 
+        0 20px 40px -20px rgba(0,0,0,0.6),
+        0 0 60px -20px rgba(180,83,9,0.15);
 }
 .clock-card::before {
     content: '';
     position: absolute;
     top: 0; right: 0;
-    width: 240px;
-    height: 240px;
-    background: radial-gradient(circle, rgba(180,83,9,0.15), transparent 70%);
+    width: 280px;
+    height: 280px;
+    background: radial-gradient(circle, rgba(251,191,36,0.08), transparent 70%);
     border-radius: 50%;
     pointer-events: none;
 }
 .clock-content { position: relative; z-index: 1; }
 .clock-label {
     font-size: 10px;
-    color: rgba(255,255,255,0.65);
+    color: var(--gold-500);
     text-transform: uppercase;
-    letter-spacing: 2px;
-    font-weight: 700;
-    margin-bottom: 12px;
+    letter-spacing: 2.5px;
+    font-weight: 800;
+    margin-bottom: 14px;
 }
 .clock-time {
-    font-family: 'JetBrains Mono', monospace;
-    font-size: 50px;
+    font-family: 'SF Mono', Consolas, 'Courier New', monospace;
+    font-size: 56px;
     font-weight: 600;
     line-height: 1;
-    letter-spacing: -1px;
-    margin-bottom: 10px;
+    letter-spacing: -2px;
+    margin-bottom: 12px;
     word-break: break-all;
+    color: var(--text-primary);
+    text-shadow: 0 0 30px rgba(251,191,36,0.15);
 }
 .clock-date {
     font-size: 13px;
-    color: rgba(255,255,255,0.75);
+    color: var(--text-muted);
     font-weight: 500;
+    letter-spacing: 0.5px;
 }
+
 .att-card {
-    background: white;
-    border: 1px solid var(--gray-200);
-    border-radius: 6px;
-    padding: 22px;
+    background: var(--black-800);
+    border: 1px solid var(--border-dark);
+    border-radius: 10px;
+    padding: 24px;
 }
 .att-status-row {
     display: grid;
     grid-template-columns: 1fr 1fr;
     gap: 1px;
-    background: var(--gray-200);
-    border-radius: 6px;
+    background: var(--border-dark);
+    border-radius: 8px;
     overflow: hidden;
-    margin-bottom: 18px;
-    border: 1px solid var(--gray-200);
+    margin-bottom: 20px;
+    border: 1px solid var(--border-dark);
 }
 .att-status-cell {
-    background: var(--gray-50);
-    padding: 16px 18px;
+    background: var(--black-700);
+    padding: 18px 20px;
 }
 .att-status-cell .lbl {
     font-size: 10px;
-    color: var(--gray-500);
+    color: var(--text-muted);
     text-transform: uppercase;
-    letter-spacing: 1.2px;
-    font-weight: 700;
-    margin-bottom: 6px;
+    letter-spacing: 1.5px;
+    font-weight: 800;
+    margin-bottom: 8px;
     display: flex;
     align-items: center;
     gap: 6px;
@@ -1452,109 +1543,146 @@ body {
     width: 6px;
     height: 6px;
     border-radius: 50%;
-    background: var(--primary);
+    background: var(--gold-600);
 }
-.att-status-cell:last-child .lbl::before { background: var(--gold); }
+.att-status-cell:last-child .lbl::before { background: var(--gold-500); }
 .att-status-cell .val {
-    font-family: 'JetBrains Mono', monospace;
-    font-size: 24px;
+    font-family: 'SF Mono', Consolas, 'Courier New', monospace;
+    font-size: 26px;
     font-weight: 600;
-    color: var(--primary);
+    color: var(--gold-500);
     line-height: 1.1;
 }
-.att-status-cell:last-child .val { color: var(--gold); }
-.att-status-cell .val.empty { color: var(--gray-300); }
+.att-status-cell .val.empty { color: var(--text-dim); }
+
 .att-buttons {
     display: grid;
     grid-template-columns: 1fr 1fr;
-    gap: 12px;
+    gap: 14px;
 }
 .btn-clock {
-    padding: 20px 16px;
+    padding: 22px 18px;
     border: none;
-    border-radius: 6px;
+    border-radius: 10px;
     cursor: pointer;
-    font-family: 'Plus Jakarta Sans', sans-serif;
-    transition: all 0.15s;
+    font-family: inherit;
+    transition: all 0.2s;
     display: flex;
     flex-direction: column;
     align-items: center;
-    gap: 8px;
+    gap: 10px;
     text-align: center;
-    min-height: 120px;
+    min-height: 130px;
     font-weight: 700;
+    position: relative;
+    overflow: hidden;
 }
+.btn-in { 
+    background: linear-gradient(135deg, #fbbf24 0%, #b45309 100%);
+    color: var(--black-900);
+    box-shadow: 0 8px 24px -8px rgba(251,191,36,0.5);
+}
+.btn-in .icon-wrap { 
+    background: rgba(0,0,0,0.15); 
+    color: var(--black-900);
+}
+.btn-in .label { color: var(--black-900); }
+.btn-in .time { color: rgba(0,0,0,0.7); }
+.btn-in:hover:not(:disabled) { 
+    transform: translateY(-2px);
+    box-shadow: 0 12px 30px -8px rgba(251,191,36,0.6);
+}
+
+.btn-out { 
+    background: var(--black-600);
+    border: 1.5px solid var(--gold-700);
+    color: var(--gold-500);
+}
+.btn-out .icon-wrap { 
+    background: rgba(180,83,9,0.15); 
+    color: var(--gold-500);
+}
+.btn-out .label { color: var(--gold-500); }
+.btn-out .time { color: var(--gold-600); }
+.btn-out:hover:not(:disabled) { 
+    background: rgba(180,83,9,0.15);
+    border-color: var(--gold-500);
+    transform: translateY(-2px);
+}
+
+.btn-clock:disabled {
+    background: var(--black-500);
+    border-color: var(--border-dark);
+    color: var(--text-dim);
+    cursor: not-allowed;
+    box-shadow: none;
+    transform: none;
+}
+.btn-clock:disabled .icon-wrap { 
+    background: rgba(75,85,99,0.3); 
+    color: var(--text-dim);
+}
+.btn-clock:disabled .label { color: var(--text-dim); }
+.btn-clock:disabled .time { color: var(--text-dim); }
+
 .btn-clock .icon-wrap {
-    width: 44px;
-    height: 44px;
+    width: 48px;
+    height: 48px;
     border-radius: 50%;
     display: flex;
     align-items: center;
     justify-content: center;
 }
 .btn-clock .label {
-    font-size: 10.5px;
+    font-size: 11px;
     text-transform: uppercase;
-    letter-spacing: 1.5px;
+    letter-spacing: 1.8px;
     font-weight: 800;
 }
 .btn-clock .time {
-    font-family: 'JetBrains Mono', monospace;
+    font-family: 'SF Mono', Consolas, monospace;
     font-size: 14px;
     font-weight: 600;
 }
-.btn-in { background: var(--primary); color: white; }
-.btn-in .icon-wrap { background: rgba(255,255,255,0.15); }
-.btn-in .label { color: rgba(255,255,255,0.8); }
-.btn-in:hover:not(:disabled) { background: var(--primary-light); }
-.btn-out { background: var(--gold); color: white; }
-.btn-out .icon-wrap { background: rgba(255,255,255,0.2); }
-.btn-out .label { color: rgba(255,255,255,0.85); }
-.btn-out:hover:not(:disabled) { background: #92400e; }
-.btn-clock:disabled {
-    background: var(--gray-200);
-    color: var(--gray-400);
-    cursor: not-allowed;
-}
-.btn-clock:disabled .icon-wrap { background: var(--gray-300); }
-.btn-clock:disabled .label { color: var(--gray-500); }
+
 .card {
-    background: white;
-    border: 1px solid var(--gray-200);
-    border-radius: 6px;
+    background: var(--black-800);
+    border: 1px solid var(--border-dark);
+    border-radius: 10px;
     overflow: hidden;
 }
 .card-header {
-    padding: 14px 18px;
-    border-bottom: 1px solid var(--gray-200);
+    padding: 16px 20px;
+    border-bottom: 1px solid var(--border-dark);
     display: flex;
     justify-content: space-between;
     align-items: center;
     gap: 12px;
     flex-wrap: wrap;
-    background: var(--gray-50);
+    background: var(--black-700);
 }
 .card-header .title {
-    font-size: 12.5px;
-    font-weight: 700;
-    color: var(--gray-900);
-    letter-spacing: 0.2px;
+    font-weight: 800;
+    color: var(--text-primary);
     display: flex;
     align-items: center;
-    gap: 8px;
+    gap: 10px;
+    text-transform: uppercase;
+    font-size: 11.5px;
+    letter-spacing: 1.5px;
 }
 .card-header .title::before {
     content: '';
     width: 3px;
-    height: 14px;
-    background: var(--primary);
+    height: 16px;
+    background: linear-gradient(180deg, var(--gold-500), var(--gold-700));
     border-radius: 2px;
 }
 .card-header .subtitle {
     font-size: 11px;
-    color: var(--gray-500);
-    margin-top: 3px;
-    padding-left: 11px;
+    color: var(--text-dim);
+    margin-top: 4px;
+    padding-left: 13px;
 }
 .card-body {
     padding: 0;
@@ -1562,115 +1690,143 @@ body {
     overflow-y: auto;
     -webkit-overflow-scrolling: touch;
 }
+
 .table-wrap { overflow-x: auto; -webkit-overflow-scrolling: touch; }
 table { width: 100%; border-collapse: collapse; min-width: 520px; }
 thead th {
-    padding: 11px 16px;
+    padding: 12px 16px;
     text-align: left;
     font-size: 10px;
     text-transform: uppercase;
-    color: var(--gray-500);
-    background: var(--gray-50);
-    border-bottom: 1px solid var(--gray-200);
+    color: var(--gold-600);
+    background: var(--black-700);
+    border-bottom: 1px solid var(--border-dark);
     font-weight: 800;
-    letter-spacing: 0.8px;
+    letter-spacing: 1.2px;
     position: sticky;
     top: 0;
     z-index: 1;
     white-space: nowrap;
 }
 tbody td {
-    padding: 12px 16px;
-    border-bottom: 1px solid var(--gray-100);
+    padding: 13px 16px;
+    border-bottom: 1px solid var(--border-dark);
     font-size: 12.5px;
     vertical-align: middle;
-    color: var(--gray-700);
+    color: var(--text-secondary);
 }
 tbody tr:last-child td { border-bottom: none; }
-tbody tr:hover { background: var(--gray-50); }
-tbody td strong { color: var(--gray-900); font-weight: 700; }
-.mono { font-family: 'JetBrains Mono', monospace; font-size: 12px; }
+tbody tr:hover { background: rgba(180,83,9,0.04); }
+tbody td strong { color: var(--text-primary); font-weight: 700; }
+.mono { font-family: 'SF Mono', Consolas, monospace; font-size: 12px; }
 .right { text-align: right; }
 .center { text-align: center; }
-.muted { color: var(--gray-500); }
+.muted { color: var(--text-muted); }
+
 .badge {
     display: inline-block;
-    padding: 3px 9px;
+    padding: 4px 10px;
     border-radius: 4px;
     font-size: 10px;
     font-weight: 800;
     text-transform: uppercase;
-    letter-spacing: 0.5px;
+    letter-spacing: 0.6px;
     white-space: nowrap;
 }
-.badge-hadir { background: var(--primary-100); color: var(--primary); }
-.badge-izin { background: var(--blue-bg); color: var(--blue); }
-.badge-sakit { background: var(--amber-bg); color: var(--amber); }
-.badge-cuti { background: var(--purple-bg); color: var(--purple); }
-.badge-alpha { background: var(--red-bg); color: var(--red); }
-.badge-aktif { background: var(--primary-100); color: var(--primary); }
-.badge-nonaktif { background: var(--gray-200); color: var(--gray-500); }
+.badge-hadir { background: var(--success-bg); color: var(--success); border: 1px solid rgba(16,185,129,0.3); }
+.badge-izin { background: var(--info-bg); color: var(--info); border: 1px solid rgba(59,130,246,0.3); }
+.badge-sakit { background: var(--warning-bg); color: var(--warning); border: 1px solid rgba(245,158,11,0.3); }
+.badge-cuti { background: var(--purple-bg); color: var(--purple); border: 1px solid rgba(167,139,250,0.3); }
+.badge-alpha { background: var(--danger-bg); color: var(--danger); border: 1px solid rgba(239,68,68,0.3); }
+.badge-aktif { background: var(--success-bg); color: var(--success); border: 1px solid rgba(16,185,129,0.3); }
+.badge-nonaktif { background: rgba(107,114,128,0.15); color: var(--text-dim); border: 1px solid var(--border-dark); }
+
 .btn {
-    padding: 9px 15px;
-    border: 1px solid var(--gray-300);
-    background: white;
-    color: var(--gray-700);
-    border-radius: 5px;
+    padding: 10px 16px;
+    border: 1px solid var(--border-mid);
+    background: var(--black-700);
+    color: var(--text-secondary);
+    border-radius: 6px;
     cursor: pointer;
     font-size: 12px;
     font-weight: 700;
     transition: all 0.15s;
-    font-family: 'Plus Jakarta Sans', sans-serif;
-    letter-spacing: 0.3px;
+    font-family: inherit;
+    letter-spacing: 0.5px;
     display: inline-flex;
     align-items: center;
     justify-content: center;
     gap: 6px;
     white-space: nowrap;
-    min-height: 38px;
+    min-height: 40px;
 }
-.btn:hover { background: var(--gray-50); border-color: var(--gray-400); }
+.btn:hover { 
+    background: var(--black-600); 
+    border-color: var(--gold-700);
+    color: var(--gold-500);
+}
 .btn:active { transform: scale(0.98); }
-.btn-primary { background: var(--primary); border-color: var(--primary); color: white; }
-.btn-primary:hover { background: var(--primary-light); border-color: var(--primary-light); }
-.btn-danger { background: white; border-color: #fecaca; color: var(--red); }
-.btn-danger:hover { background: var(--red-bg); border-color: var(--red); }
-.btn-sm { padding: 6px 10px; font-size: 11px; min-height: 30px; }
+.btn-primary { 
+    background: linear-gradient(135deg, #fbbf24 0%, #b45309 100%);
+    border-color: var(--gold-600);
+    color: var(--black-900);
+    font-weight: 800;
+    box-shadow: 0 4px 16px -4px rgba(251,191,36,0.4);
+}
+.btn-primary:hover { 
+    background: linear-gradient(135deg, #fcd34d 0%, #d97706 100%);
+    color: var(--black-900);
+    box-shadow: 0 6px 20px -4px rgba(251,191,36,0.5);
+}
+.btn-danger { 
+    background: var(--black-700); 
+    border-color: rgba(239,68,68,0.3); 
+    color: var(--danger);
+}
+.btn-danger:hover { 
+    background: rgba(239,68,68,0.1);
+    border-color: var(--danger); 
+    color: var(--danger);
+}
+.btn-sm { padding: 7px 12px; font-size: 11px; min-height: 32px; }
 .btn-icon {
-    width: 32px;
-    height: 32px;
+    width: 34px;
+    height: 34px;
     padding: 0;
     justify-content: center;
     font-size: 13px;
-    min-height: 32px;
+    min-height: 34px;
 }
-.form-row { margin-bottom: 15px; }
+
+.form-row { margin-bottom: 16px; }
 .form-row label {
     display: block;
     font-size: 10.5px;
-    font-weight: 700;
-    color: var(--gray-700);
-    margin-bottom: 6px;
+    font-weight: 800;
+    color: var(--gold-600);
+    margin-bottom: 7px;
     text-transform: uppercase;
-    letter-spacing: 1px;
+    letter-spacing: 1.2px;
 }
 .form-row input, .form-row select {
     width: 100%;
-    padding: 11px 13px;
-    border: 1.5px solid var(--gray-300);
-    border-radius: 5px;
+    padding: 12px 14px;
+    border: 1px solid var(--border-mid);
+    border-radius: 6px;
     font-size: 13px;
-    font-family: 'Plus Jakarta Sans', sans-serif;
+    font-family: inherit;
     outline: none;
     transition: all 0.15s;
-    background: white;
-    color: var(--gray-900);
-    min-height: 42px;
+    background: var(--black-900);
+    color: var(--text-primary);
+    min-height: 44px;
 }
 .form-row input:focus, .form-row select:focus {
-    border-color: var(--primary);
-    box-shadow: 0 0 0 3px rgba(6,78,59,0.1);
+    border-color: var(--gold-600);
+    box-shadow: 0 0 0 3px rgba(180,83,9,0.15);
 }
+.form-row input::placeholder { color: var(--text-dim); }
+
 .toolbar {
     display: flex;
     gap: 10px;
@@ -1678,31 +1834,42 @@ tbody td strong { color: var(--gray-900); font-weight: 700; }
     flex-wrap: wrap;
 }
 .toolbar input, .toolbar select {
-    padding: 10px 13px;
-    border: 1.5px solid var(--gray-300);
-    border-radius: 5px;
+    padding: 11px 14px;
+    border: 1px solid var(--border-mid);
+    border-radius: 6px;
     font-size: 12.5px;
-    font-family: 'Plus Jakarta Sans', sans-serif;
+    font-family: inherit;
     outline: none;
-    background: white;
-    color: var(--gray-900);
-    min-height: 40px;
+    background: var(--black-800);
+    color: var(--text-primary);
+    min-height: 42px;
+    transition: all 0.15s;
 }
-.toolbar input:focus, .toolbar select:focus { border-color: var(--primary); }
+.toolbar input:focus, .toolbar select:focus { 
+    border-color: var(--gold-600);
+    box-shadow: 0 0 0 3px rgba(180,83,9,0.1);
+}
+.toolbar input::placeholder { color: var(--text-dim); }
 .toolbar input { flex: 1; min-width: 180px; }
 .toolbar select { min-width: 150px; }
+
 .stats-row {
     display: grid;
-    grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
-    gap: 12px;
+    grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+    gap: 14px;
 }
 .stat-card {
-    background: white;
-    border: 1px solid var(--gray-200);
-    border-radius: 6px;
-    padding: 16px 18px;
+    background: var(--black-800);
+    border: 1px solid var(--border-dark);
+    border-radius: 10px;
+    padding: 20px 22px;
     position: relative;
     overflow: hidden;
+    transition: all 0.2s;
+}
+.stat-card:hover {
+    border-color: var(--gold-700);
+    transform: translateY(-2px);
 }
 .stat-card::before {
     content: '';
@@ -1710,35 +1877,36 @@ tbody td strong { color: var(--gray-900); font-weight: 700; }
     top: 0; left: 0;
     width: 3px;
     height: 100%;
-    background: var(--primary);
+    background: linear-gradient(180deg, var(--gold-500), var(--gold-700));
 }
-.stat-card.gold::before { background: var(--gold); }
-.stat-card.red::before { background: var(--red); }
-.stat-card.blue::before { background: var(--blue); }
+.stat-card.blue::before { background: linear-gradient(180deg, var(--info), #1e40af); }
+.stat-card.gold::before { background: linear-gradient(180deg, var(--gold-500), var(--gold-700)); }
+.stat-card.red::before { background: linear-gradient(180deg, var(--danger), #991b1b); }
 .stat-card .lbl {
     font-size: 10px;
-    color: var(--gray-500);
+    color: var(--text-muted);
     text-transform: uppercase;
     font-weight: 800;
-    letter-spacing: 1px;
-    margin-bottom: 8px;
+    letter-spacing: 1.5px;
+    margin-bottom: 10px;
 }
 .stat-card .val {
-    font-family: 'JetBrains Mono', monospace;
-    font-size: 24px;
+    font-family: 'SF Mono', Consolas, monospace;
+    font-size: 28px;
     font-weight: 600;
-    color: var(--gray-900);
+    color: var(--text-primary);
     line-height: 1;
     letter-spacing: -0.5px;
 }
 .stat-card .val .unit {
     font-size: 11px;
-    color: var(--gray-500);
-    margin-left: 4px;
+    color: var(--text-muted);
+    margin-left: 6px;
     font-weight: 500;
-    font-family: 'Plus Jakarta Sans', sans-serif;
+    font-family: inherit;
     letter-spacing: 0;
 }
+
 .live-grid {
     display: grid;
     grid-template-columns: 1fr 1fr;
@@ -1748,32 +1916,34 @@ tbody td strong { color: var(--gray-900); font-weight: 700; }
     display: inline-flex;
     align-items: center;
     gap: 6px;
-    padding: 3px 10px;
-    background: var(--primary-50);
-    color: var(--primary);
-    border: 1px solid var(--primary-200);
-    border-radius: 12px;
+    padding: 4px 12px;
+    background: rgba(16,185,129,0.08);
+    color: var(--success);
+    border: 1px solid rgba(16,185,129,0.3);
+    border-radius: 20px;
     font-size: 9.5px;
     font-weight: 800;
-    letter-spacing: 1px;
+    letter-spacing: 1.2px;
     text-transform: uppercase;
 }
 .live-dot {
     width: 6px;
     height: 6px;
-    background: var(--primary);
+    background: var(--success);
     border-radius: 50%;
     animation: blink 1.5s infinite;
+    box-shadow: 0 0 8px var(--success);
 }
 @keyframes blink {
     0%, 100% { opacity: 1; }
     50% { opacity: 0.3; }
 }
+
 .event-item {
-    padding: 11px 16px;
-    border-bottom: 1px solid var(--gray-100);
+    padding: 13px 18px;
+    border-bottom: 1px solid var(--border-dark);
     display: flex;
-    gap: 12px;
+    gap: 13px;
     align-items: center;
     animation: slideDown 0.3s;
 }
@@ -1783,181 +1953,212 @@ tbody td strong { color: var(--gray-900); font-weight: 700; }
 }
 .event-item:last-child { border-bottom: none; }
 .event-icon {
-    width: 32px;
-    height: 32px;
-    border-radius: 6px;
+    width: 36px;
+    height: 36px;
+    border-radius: 8px;
     display: flex;
     align-items: center;
     justify-content: center;
-    font-size: 14px;
+    font-size: 15px;
     flex-shrink: 0;
     font-weight: bold;
 }
-.event-item.masuk .event-icon { background: var(--primary-50); color: var(--primary); }
-.event-item.pulang .event-icon { background: var(--gold-light); color: var(--gold); }
+.event-item.masuk .event-icon { 
+    background: var(--success-bg); 
+    color: var(--success); 
+    border: 1px solid rgba(16,185,129,0.3);
+}
+.event-item.pulang .event-icon { 
+    background: rgba(180,83,9,0.1); 
+    color: var(--gold-500); 
+    border: 1px solid rgba(180,83,9,0.3);
+}
 .event-content { flex: 1; min-width: 0; }
 .event-content .title {
-    font-size: 12.5px;
+    font-size: 13px;
     font-weight: 700;
-    color: var(--gray-900);
+    color: var(--text-primary);
     white-space: nowrap;
     overflow: hidden;
     text-overflow: ellipsis;
 }
 .event-content .desc {
     font-size: 11px;
-    color: var(--gray-500);
+    color: var(--text-muted);
     margin-top: 2px;
 }
 .event-time {
-    font-family: 'JetBrains Mono', monospace;
+    font-family: 'SF Mono', Consolas, monospace;
     font-size: 11px;
-    color: var(--gray-400);
+    color: var(--gold-600);
     flex-shrink: 0;
+    font-weight: 600;
 }
+
 .modal {
     display: none;
     position: fixed;
     inset: 0;
-    background: rgba(15,23,42,0.65);
+    background: rgba(0,0,0,0.85);
     z-index: 1000;
     align-items: center;
     justify-content: center;
     padding: 16px;
-    backdrop-filter: blur(2px);
+    backdrop-filter: blur(4px);
 }
 .modal.show { display: flex; }
 .modal-box {
-    background: white;
-    border-radius: 8px;
+    background: var(--black-800);
+    border: 1px solid var(--border-dark);
+    border-radius: 12px;
     width: 100%;
-    max-width: 480px;
+    max-width: 500px;
     max-height: 90vh;
     display: flex;
     flex-direction: column;
     overflow: hidden;
-    box-shadow: 0 20px 25px -5px rgba(0,0,0,0.25);
+    box-shadow: 
+        0 25px 50px -12px rgba(0,0,0,0.8),
+        0 0 80px -20px rgba(180,83,9,0.2);
 }
 .modal-header {
-    padding: 16px 22px;
-    border-bottom: 1px solid var(--gray-200);
+    padding: 18px 24px;
+    border-bottom: 1px solid var(--border-dark);
     display: flex;
     justify-content: space-between;
     align-items: center;
-    background: var(--primary);
-    color: white;
+    background: var(--black-700);
+    position: relative;
+}
+.modal-header::after {
+    content: '';
+    position: absolute;
+    bottom: -1px;
+    left: 24px;
+    width: 60px;
+    height: 2px;
+    background: linear-gradient(90deg, var(--gold-500), transparent);
 }
 .modal-header h2 {
-    font-size: 13.5px;
-    font-weight: 800;
-    letter-spacing: 0.5px;
-    text-transform: uppercase;
+    font-family: Georgia, serif;
+    font-size: 16px;
+    font-weight: 700;
+    color: var(--gold-500);
+    letter-spacing: 0.8px;
 }
 .modal-header .close {
-    background: rgba(255,255,255,0.15);
-    border: none;
-    color: white;
-    font-size: 20px;
+    background: transparent;
+    border: 1px solid var(--border-mid);
+    color: var(--text-muted);
+    font-size: 18px;
     cursor: pointer;
-    width: 32px;
-    height: 32px;
-    border-radius: 4px;
+    width: 34px;
+    height: 34px;
+    border-radius: 6px;
     display: flex;
     align-items: center;
     justify-content: center;
     line-height: 1;
+    transition: all 0.15s;
 }
-.modal-header .close:hover { background: rgba(255,255,255,0.25); }
+.modal-header .close:hover { 
+    background: rgba(239,68,68,0.1);
+    border-color: var(--danger);
+    color: var(--danger);
+}
 .modal-body {
-    padding: 22px;
+    padding: 24px;
     overflow-y: auto;
     -webkit-overflow-scrolling: touch;
 }
 .modal-footer {
-    padding: 14px 22px;
-    background: var(--gray-50);
-    border-top: 1px solid var(--gray-200);
+    padding: 16px 24px;
+    background: var(--black-900);
+    border-top: 1px solid var(--border-dark);
     display: flex;
-    gap: 8px;
+    gap: 10px;
     justify-content: flex-end;
 }
+
 .toast {
     position: fixed;
-    top: calc(74px + var(--safe-top));
+    top: calc(80px + var(--safe-top));
     right: 20px;
     left: 20px;
     z-index: 2000;
-    padding: 13px 16px;
-    border-radius: 6px;
-    background: var(--gray-900);
-    color: white;
-    font-size: 12.5px;
+    padding: 15px 18px;
+    border-radius: 8px;
+    background: var(--black-700);
+    color: var(--text-primary);
+    font-size: 13px;
     font-weight: 600;
-    box-shadow: 0 10px 15px -3px rgba(0,0,0,0.25);
+    box-shadow: 0 10px 25px -5px rgba(0,0,0,0.5);
     opacity: 0;
     transform: translateY(-20px);
     transition: all 0.3s;
-    max-width: 400px;
+    max-width: 420px;
     margin-left: auto;
     display: flex;
     align-items: center;
     gap: 10px;
-    border-left: 3px solid var(--gray-400);
+    border: 1px solid var(--border-dark);
 }
 .toast.show { opacity: 1; transform: translateY(0); }
-.toast.success { border-left-color: var(--primary); }
-.toast.error { border-left-color: var(--red); }
-.toast.info { border-left-color: var(--blue); }
-.toast.warning { border-left-color: var(--gold); }
+.toast.success { border-left: 3px solid var(--success); }
+.toast.error { border-left: 3px solid var(--danger); }
+.toast.info { border-left: 3px solid var(--info); }
+.toast.warning { border-left: 3px solid var(--warning); }
+
 .empty-state {
-    padding: 44px 20px;
+    padding: 48px 20px;
     text-align: center;
-    color: var(--gray-500);
+    color: var(--text-dim);
     font-size: 12.5px;
 }
+
 @media (max-width: 1024px) {
     .page { padding: 18px; gap: 14px; }
     .live-grid { grid-template-columns: 1fr; }
-    .clock-time { font-size: 42px; }
+    .clock-time { font-size: 46px; }
 }
 @media (max-width: 768px) {
     .app-header {
         padding: 0 12px;
         gap: 10px;
-        height: calc(56px + var(--safe-top));
+        height: calc(60px + var(--safe-top));
     }
     .app-brand { padding-right: 10px; gap: 8px; }
-    .app-brand .monogram { width: 30px; height: 30px; font-size: 10px; }
-    .app-brand .name { font-size: 10.5px; letter-spacing: 1.2px; }
+    .app-brand .monogram { width: 32px; height: 32px; font-size: 10px; }
+    .app-brand .name { font-size: 12px; letter-spacing: 1px; }
     .app-brand .sub { display: none; }
     .app-user .info { display: none; }
-    .app-user .avatar { width: 30px; height: 30px; font-size: 11px; }
-    .btn-logout { padding: 5px 9px; font-size: 9.5px; min-height: 28px; }
+    .app-user .avatar { width: 32px; height: 32px; font-size: 12px; }
+    .btn-logout { padding: 6px 10px; font-size: 9.5px; min-height: 30px; }
     .nav-item { padding: 0 12px; font-size: 11px; }
     .page { padding: 14px; gap: 12px; }
-    .page-header { padding-bottom: 12px; }
-    .page-header .titles h1 { font-size: 18px; }
+    .page-header { padding-bottom: 14px; }
+    .page-header .titles h1 { font-size: 22px; }
     .page-header .titles .subtitle { font-size: 11px; }
-    .greeting { padding: 13px 15px; gap: 12px; }
-    .greeting .icon { width: 38px; height: 38px; font-size: 18px; }
-    .greeting .content h2 { font-size: 13px; }
+    .greeting { padding: 14px 16px; gap: 12px; }
+    .greeting .icon { width: 40px; height: 40px; font-size: 19px; }
+    .greeting .content h2 { font-size: 13.5px; }
     .greeting .content p { font-size: 11px; }
-    .clock-card { padding: 22px 20px; }
-    .clock-time { font-size: 36px; letter-spacing: -1px; }
+    .clock-card { padding: 24px 22px; }
+    .clock-time { font-size: 40px; letter-spacing: -1.5px; }
     .clock-date { font-size: 12px; }
-    .att-card { padding: 16px; }
-    .att-status-cell { padding: 14px 16px; }
-    .att-status-cell .val { font-size: 20px; }
+    .att-card { padding: 18px; }
+    .att-status-cell { padding: 15px 16px; }
+    .att-status-cell .val { font-size: 22px; }
     .att-buttons { grid-template-columns: 1fr; gap: 10px; }
     .btn-clock {
-        padding: 16px 14px;
-        min-height: 80px;
+        padding: 18px 16px;
+        min-height: 90px;
         flex-direction: row;
         justify-content: center;
-        gap: 12px;
+        gap: 14px;
     }
-    .btn-clock .icon-wrap { width: 38px; height: 38px; }
-    .btn-clock .label { font-size: 9.5px; }
+    .btn-clock .icon-wrap { width: 42px; height: 42px; }
+    .btn-clock .label { font-size: 10px; }
     .btn-clock .time { font-size: 13px; }
     table.responsive-table { min-width: 0; }
     table.responsive-table thead { display: none; }
@@ -1969,15 +2170,15 @@ tbody td strong { color: var(--gray-900); font-weight: 700; }
         width: 100%;
     }
     table.responsive-table tr {
-        border: 1px solid var(--gray-200);
-        border-radius: 6px;
-        margin-bottom: 10px;
-        padding: 14px;
-        background: white;
+        border: 1px solid var(--border-dark);
+        border-radius: 8px;
+        margin-bottom: 12px;
+        padding: 16px;
+        background: var(--black-700);
     }
-    table.responsive-table tr:hover { background: white; }
+    table.responsive-table tr:hover { background: var(--black-700); }
     table.responsive-table td {
-        padding: 6px 0;
+        padding: 7px 0;
         border: none;
         font-size: 12.5px;
         display: flex;
@@ -1989,48 +2190,49 @@ tbody td strong { color: var(--gray-900); font-weight: 700; }
         content: attr(data-label);
         font-size: 10px;
         font-weight: 800;
-        color: var(--gray-500);
+        color: var(--gold-600);
         text-transform: uppercase;
-        letter-spacing: 0.8px;
+        letter-spacing: 1px;
         flex-shrink: 0;
     }
     table.responsive-table td:last-child { padding-bottom: 0; }
     table.responsive-table td:first-child {
         padding-top: 0;
-        padding-bottom: 10px;
-        border-bottom: 1px solid var(--gray-100);
-        margin-bottom: 6px;
+        padding-bottom: 12px;
+        border-bottom: 1px solid var(--border-dark);
+        margin-bottom: 8px;
         font-size: 14px;
         font-weight: 800;
+        color: var(--text-primary);
     }
     table.responsive-table td:first-child::before { display: none; }
     .toolbar { flex-direction: column; align-items: stretch; }
     .toolbar input, .toolbar select, .toolbar .btn { width: 100%; min-width: 0; }
-    .stats-row { grid-template-columns: 1fr 1fr; gap: 10px; }
-    .stat-card { padding: 13px 15px; }
-    .stat-card .lbl { font-size: 9px; letter-spacing: 0.8px; }
-    .stat-card .val { font-size: 20px; }
+    .stats-row { grid-template-columns: 1fr 1fr; gap: 12px; }
+    .stat-card { padding: 16px 18px; }
+    .stat-card .lbl { font-size: 9px; letter-spacing: 1.2px; }
+    .stat-card .val { font-size: 22px; }
     .stat-card .val .unit { font-size: 10px; }
-    .card-header { padding: 12px 15px; }
-    .card-header .title { font-size: 12px; }
+    .card-header { padding: 14px 18px; }
+    .card-header .title { font-size: 11px; }
     .card-body { max-height: none; }
     .modal { align-items: flex-end; padding: 0; }
     .modal-box {
         max-width: 100%;
         max-height: 92vh;
-        border-radius: 12px 12px 0 0;
+        border-radius: 16px 16px 0 0;
         animation: slideUp 0.25s ease-out;
     }
     @keyframes slideUp {
         from { transform: translateY(100%); }
         to { transform: translateY(0); }
     }
-    .modal-header { padding: 14px 18px; }
-    .modal-body { padding: 18px; }
-    .modal-footer { padding: 12px 18px; padding-bottom: calc(12px + var(--safe-bottom)); }
+    .modal-header { padding: 16px 20px; }
+    .modal-body { padding: 20px; }
+    .modal-footer { padding: 14px 20px; padding-bottom: calc(14px + var(--safe-bottom)); }
     .modal-footer .btn { flex: 1; }
     .toast {
-        top: calc(66px + var(--safe-top));
+        top: calc(70px + var(--safe-top));
         right: 12px;
         left: 12px;
         max-width: none;
@@ -2042,11 +2244,11 @@ tbody td strong { color: var(--gray-900); font-weight: 700; }
     .nav-item .nav-text { display: none; }
     .nav-item { padding: 0 14px; }
     .stats-row { grid-template-columns: 1fr; }
-    .clock-time { font-size: 30px; }
-    .page-header .titles h1 { font-size: 17px; }
-    .card-header { padding: 11px 13px; }
-    .btn { padding: 8px 13px; font-size: 11.5px; }
-    .btn-icon { width: 30px; height: 30px; }
+    .clock-time { font-size: 34px; letter-spacing: -1px; }
+    .page-header .titles h1 { font-size: 20px; }
+    .card-header { padding: 12px 15px; }
+    .btn { padding: 9px 14px; font-size: 11.5px; }
+    .btn-icon { width: 32px; height: 32px; }
 }
 </style>
 </head>
@@ -2110,7 +2312,7 @@ tbody td strong { color: var(--gray-900); font-weight: 700; }
             <div class="att-buttons">
                 <button class="btn-clock btn-in" id="btnMasuk" onclick="absenMasuk()">
                     <div class="icon-wrap">
-                        <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M15 3h4a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2h-4"/><polyline points="10 17 15 12 10 7"/><line x1="15" y1="12" x2="3" y2="12"/></svg>
+                        <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M15 3h4a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2h-4"/><polyline points="10 17 15 12 10 7"/><line x1="15" y1="12" x2="3" y2="12"/></svg>
                     </div>
                     <div>
                         <div class="label">Absen Datang</div>
@@ -2119,7 +2321,7 @@ tbody td strong { color: var(--gray-900); font-weight: 700; }
                 </button>
                 <button class="btn-clock btn-out" id="btnPulang" onclick="absenPulang()">
                     <div class="icon-wrap">
-                        <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"/><polyline points="16 17 21 12 16 7"/><line x1="21" y1="12" x2="9" y2="12"/></svg>
+                        <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"/><polyline points="16 17 21 12 16 7"/><line x1="21" y1="12" x2="9" y2="12"/></svg>
                     </div>
                     <div>
                         <div class="label">Absen Pulang</div>
@@ -2134,7 +2336,7 @@ tbody td strong { color: var(--gray-900); font-weight: 700; }
                     <div class="title">Riwayat Kehadiran</div>
                     <div class="subtitle">Catatan absensi pribadi Anda</div>
                 </div>
-                <input type="month" id="filterBulanAnggota" onchange="loadRiwayatAnggota()" style="padding:8px 10px;border:1.5px solid var(--gray-300);border-radius:5px;font-size:12px;">
+                <input type="month" id="filterBulanAnggota" onchange="loadRiwayatAnggota()" style="padding:9px 12px;border:1px solid var(--border-mid);border-radius:6px;font-size:12px;background:var(--black-900);color:var(--text-primary);">
             </div>
             <div class="card-body">
                 <div class="table-wrap">
@@ -2184,7 +2386,7 @@ tbody td strong { color: var(--gray-900); font-weight: 700; }
                         <div class="subtitle">Daftar anggota yang sudah absen</div>
                     </div>
                 </div>
-                <div class="card-body" style="max-height:340px;">
+                <div class="card-body" style="max-height:360px;">
                     <div class="table-wrap">
                         <table class="responsive-table">
                             <thead><tr><th>Nama</th><th>Divisi</th><th class="center">Datang</th><th class="center">Pulang</th></tr></thead>
@@ -2201,7 +2403,7 @@ tbody td strong { color: var(--gray-900); font-weight: 700; }
                     </div>
                     <div class="live-badge"><span class="live-dot"></span>LIVE</div>
                 </div>
-                <div class="card-body" style="max-height:340px;" id="eventLog">
+                <div class="card-body" style="max-height:360px;" id="eventLog">
                     <div class="empty-state">Memuat data...</div>
                 </div>
             </div>
@@ -2248,7 +2450,7 @@ tbody td strong { color: var(--gray-900); font-weight: 700; }
                 <div class="table-wrap">
                     <table class="responsive-table">
                         <thead><tr>
-                            <th style="width:100px;">No. Anggota</th>
+                            <th style="width:110px;">No. Anggota</th>
                             <th>Nama</th>
                             <th>Jabatan</th>
                             <th>Divisi</th>
@@ -2292,12 +2494,12 @@ tbody td strong { color: var(--gray-900); font-weight: 700; }
                 <div class="table-wrap">
                     <table class="responsive-table">
                         <thead><tr>
-                            <th style="width:110px;">Tanggal</th>
+                            <th style="width:120px;">Tanggal</th>
                             <th>Nama Anggota</th>
                             <th>Jabatan</th>
-                            <th class="center" style="width:100px;">Datang</th>
-                            <th class="center" style="width:100px;">Pulang</th>
-                            <th style="width:110px;">Status</th>
+                            <th class="center" style="width:110px;">Datang</th>
+                            <th class="center" style="width:110px;">Pulang</th>
+                            <th style="width:120px;">Status</th>
                         </tr></thead>
                         <tbody id="semuaBody"></tbody>
                     </table>
@@ -2322,7 +2524,7 @@ tbody td strong { color: var(--gray-900); font-weight: 700; }
             <button class="btn btn-primary" onclick="exportPDF()">EXPORT PDF</button>
         </div>
         <div class="stats-row">
-            <div class="stat-card">
+            <div class="stat-card gold">
                 <div class="lbl">Hari Kerja Bulan Ini</div>
                 <div class="val" id="statHariKerja">0<span class="unit">hari</span></div>
             </div>
@@ -2330,7 +2532,7 @@ tbody td strong { color: var(--gray-900); font-weight: 700; }
                 <div class="lbl">Total Anggota</div>
                 <div class="val" id="statTotalAnggotaRekap">0<span class="unit">orang</span></div>
             </div>
-            <div class="stat-card gold">
+            <div class="stat-card">
                 <div class="lbl">Total Kehadiran</div>
                 <div class="val" id="statTotalHadir">0<span class="unit">hari</span></div>
             </div>
@@ -2450,7 +2652,11 @@ let eventSource = null;
 let pollingInterval = null;
 let CSRF_TOKEN = '';
 let idleTimer = null;
+let loadedTabs = { dashboard: false, anggota: false, semua: false, rekap: false };
+let cacheAnggota = null;
+let cacheTime = 0;
 const IDLE_TIMEOUT = 2 * 60 * 60 * 1000;
+const CACHE_DURATION = 30000;
 
 async function fetchJSON(url, options = {}) {
     try {
@@ -2513,12 +2719,11 @@ window.addEventListener('load', async () => {
     
     if (data.role === 'admin') {
         switchView('dashboard');
-        loadAnggota();
-        loadSemuaAbsen();
-        loadRekap();
+        // Load hanya data yang dibutuhkan — load yang lain saat tab dibuka
         loadDashboard();
         muatRiwayatEvent();
-        setupRealtime();
+        // Realtime di-delay biar tidak blocking initial load
+        setTimeout(() => setupRealtime(), 1200);
     } else {
         switchView('absen');
         cekStatusAbsen();
@@ -2591,10 +2796,12 @@ function switchView(name, btn) {
     }
     document.querySelectorAll('.view').forEach(v => v.classList.remove('active'));
     document.getElementById('view-' + name).classList.add('active');
+    
+    // Lazy load — hanya load saat pertama kali buka tab
     if (name === 'dashboard') loadDashboard();
-    if (name === 'anggota') loadAnggota();
-    if (name === 'semua') loadSemuaAbsen();
-    if (name === 'rekap') loadRekap();
+    if (name === 'anggota' && !loadedTabs.anggota) { loadAnggota(); loadedTabs.anggota = true; }
+    if (name === 'semua' && !loadedTabs.semua) { loadSemuaAbsen(); loadedTabs.semua = true; }
+    if (name === 'rekap' && !loadedTabs.rekap) { loadRekap(); loadedTabs.rekap = true; }
     if (name === 'absen') { cekStatusAbsen(); loadRiwayatAnggota(); }
 }
 
@@ -2641,7 +2848,7 @@ function setupPolling() {
     pollingInterval = setInterval(() => {
         if (currentView === 'dashboard') loadDashboard();
         if (currentView === 'semua') loadSemuaAbsen();
-    }, 5000);
+    }, 8000);
 }
 
 async function muatRiwayatEvent() {
@@ -2672,7 +2879,13 @@ async function muatRiwayatEvent() {
 async function loadDashboard() {
     try {
         const dataHariIni = await fetchJSON('/api/absensi/hari-ini') || [];
-        const semuaAnggota = await fetchJSON('/api/anggota') || [];
+        // Pakai cache kalau ada
+        let semuaAnggota = cacheAnggota;
+        if (!semuaAnggota) {
+            semuaAnggota = await fetchJSON('/api/anggota') || [];
+            cacheAnggota = semuaAnggota;
+            cacheTime = Date.now();
+        }
         const aktifAnggota = semuaAnggota.filter(k => k.aktif && k.role === 'anggota');
         document.getElementById('statHadirHariIni').innerHTML = dataHariIni.length + '<span class="unit">anggota</span>';
         document.getElementById('statTotalAnggota').innerHTML = aktifAnggota.length + '<span class="unit">orang</span>';
@@ -2687,8 +2900,8 @@ async function loadDashboard() {
         tbody.innerHTML = '';
         dataHariIni.forEach(a => {
             const row = document.createElement('tr');
-            const masuk = a.jam_masuk !== '-' ? `<strong style="color:var(--primary);font-family:'JetBrains Mono',monospace;">${a.jam_masuk}</strong>` : '<span class="muted">-</span>';
-            const pulang = a.jam_pulang !== '-' ? `<strong style="color:var(--gold);font-family:'JetBrains Mono',monospace;">${a.jam_pulang}</strong>` : '<span class="muted">-</span>';
+            const masuk = a.jam_masuk !== '-' ? `<strong style="color:var(--gold-500);font-family:'SF Mono',Consolas,monospace;">${a.jam_masuk}</strong>` : '<span class="muted">-</span>';
+            const pulang = a.jam_pulang !== '-' ? `<strong style="color:var(--success);font-family:'SF Mono',Consolas,monospace;">${a.jam_pulang}</strong>` : '<span class="muted">-</span>';
             row.innerHTML = `
                 <td data-label="Nama"><strong>${escapeHtml(a.nama)}</strong></td>
                 <td data-label="Divisi">${escapeHtml(a.divisi)}</td>
@@ -2774,14 +2987,23 @@ async function loadRiwayatAnggota() {
     });
 }
 
-async function loadAnggota() {
-    anggotaList = await fetchJSON('/api/anggota') || [];
+async function loadAnggota(forceRefresh = false) {
+    const now = Date.now();
+    if (!forceRefresh && cacheAnggota && (now - cacheTime) < CACHE_DURATION) {
+        anggotaList = cacheAnggota;
+    } else {
+        anggotaList = await fetchJSON('/api/anggota') || [];
+        cacheAnggota = anggotaList;
+        cacheTime = now;
+    }
     renderAnggota();
     const sel = document.getElementById('filterAnggotaSemua');
-    sel.innerHTML = '<option value="">Semua Anggota</option>';
-    anggotaList.forEach(k => {
-        sel.innerHTML += `<option value="${k.id}">${escapeHtml(k.nama)}</option>`;
-    });
+    if (sel) {
+        sel.innerHTML = '<option value="">Semua Anggota</option>';
+        anggotaList.forEach(k => {
+            sel.innerHTML += `<option value="${k.id}">${escapeHtml(k.nama)}</option>`;
+        });
+    }
 }
 
 function renderAnggota() {
@@ -2811,7 +3033,7 @@ function renderAnggota() {
             <td data-label="Kontak" class="muted" style="font-size:11.5px;">${escapeHtml(k.email || '-')}<br>${escapeHtml(k.no_hp || '-')}</td>
             <td data-label="Status"><span class="badge badge-${k.aktif ? 'aktif' : 'nonaktif'}">${k.aktif ? 'Aktif' : 'Nonaktif'}</span></td>
             <td data-label="Aksi" class="center">
-                <div style="display:flex;gap:4px;justify-content:center;">
+                <div style="display:flex;gap:6px;justify-content:center;">
                     <button class="btn btn-sm btn-icon" onclick="editAnggota(${k.id})" title="Edit">✏</button>
                     <button class="btn btn-sm btn-icon btn-danger" onclick="hapusAnggota(${k.id}, '${escapeAttr(k.nama)}')" title="Hapus">🗑</button>
                 </div>
@@ -2907,8 +3129,9 @@ async function simpanAnggota() {
     });
     if (data && data.success) {
         showToast(data.message, 'success');
+        cacheAnggota = null;
         tutupModalAnggota();
-        loadAnggota();
+        loadAnggota(true);
     } else if (data) { showToast(data.message, 'error'); }
 }
 
@@ -2917,7 +3140,8 @@ async function hapusAnggota(id, nama) {
     const data = await fetchJSON('/api/anggota/' + id, {method: 'DELETE'});
     if (data && data.success) {
         showToast(data.message, 'success');
-        loadAnggota();
+        cacheAnggota = null;
+        loadAnggota(true);
     } else if (data) { showToast(data.message, 'error'); }
 }
 
@@ -2967,11 +3191,11 @@ async function loadRekap() {
         row.innerHTML = `
             <td data-label="Nama"><strong>${escapeHtml(r.nama)}</strong></td>
             <td data-label="Divisi">${escapeHtml(r.divisi)}</td>
-            <td data-label="Hadir" class="center mono" style="color:var(--primary);font-weight:700;">${r.hadir}</td>
+            <td data-label="Hadir" class="center mono" style="color:var(--gold-500);font-weight:700;">${r.hadir}</td>
             <td data-label="Izin" class="center mono">${r.izin}</td>
             <td data-label="Sakit" class="center mono">${r.sakit}</td>
             <td data-label="Cuti" class="center mono">${r.cuti}</td>
-            <td data-label="Alpha" class="center mono" style="color:var(--red);font-weight:700;">${r.alpha}</td>
+            <td data-label="Alpha" class="center mono" style="color:var(--danger);font-weight:700;">${r.alpha}</td>
             <td data-label="Kehadiran" class="center"><strong class="mono">${persen}%</strong></td>
         `;
         tbody.appendChild(row);
@@ -3020,12 +3244,12 @@ if __name__ == '__main__':
     print(f"  {ORG['desa']}")
     print("=" * 70)
     print()
-    print("  🔒 SECURE VERSION v3.2")
-    print("  - Waktu WIB (Asia/Jakarta) realtime")
-    print("  - Bcrypt password hashing")
-    print("  - Rate limiting login")
-    print("  - CSRF protection")
-    print("  - Security headers")
+    print("  ⚡ OPTIMIZED BLACK & GOLD v5.0")
+    print("  - Sistem font (loading instan)")
+    print("  - Lazy load tabs (hemat resource)")
+    print("  - Cache data anggota (30s)")
+    print("  - SQLite WAL mode (query cepat)")
+    print("  - Realtime delayed (tidak blocking)")
     print()
     
     port = int(os.environ.get('PORT', 5000))
