@@ -2,7 +2,7 @@
 ============================================================
   SISTEM ABSENSI KARANG TARUNA KARIKATUR 007
   Desa Mekarsari RT.07/RW.07
-  Optimized Black & Gold Edition v5.0
+  Optimized Black & Gold v6.0 — Super Fast
 ============================================================
 """
 
@@ -66,6 +66,16 @@ def jam_wib():
 def waktu_lengkap_wib():
     return sekarang_wib().strftime('%Y-%m-%d %H:%M:%S')
 
+def hitung_bulan_next(bulan):
+    """Hitung bulan berikutnya (untuk range query)"""
+    try:
+        th, bl = map(int, bulan.split('-'))
+        if bl == 12:
+            return f"{th+1}-01"
+        return f"{th}-{bl+1:02d}"
+    except:
+        return bulan
+
 # ============================================================
 # KONFIGURASI
 # ============================================================
@@ -111,7 +121,7 @@ limiter = Limiter(
 
 CORS(app, supports_credentials=True, origins='*')
 
-DB_FILE = "absensi_k007_v5.db"
+DB_FILE = "absensi_k007_v6.db"
 sse_clients = []
 
 # ============================================================
@@ -195,10 +205,11 @@ def verify_password(password, hashed):
         return hashlib.sha256(password.encode()).hexdigest() == hashed
 
 def get_db():
-    """Buat koneksi DB dengan timeout & WAL mode untuk performa"""
+    """Buat koneksi DB dengan WAL mode untuk performa maksimal"""
     conn = sqlite3.connect(DB_FILE, timeout=10.0)
     conn.execute('PRAGMA journal_mode=WAL')
     conn.execute('PRAGMA synchronous=NORMAL')
+    conn.execute('PRAGMA cache_size=-64000')  # 64MB cache
     return conn
 
 def init_db():
@@ -231,8 +242,11 @@ def init_db():
         FOREIGN KEY (anggota_id) REFERENCES anggota(id)
     )''')
     
+    # Index untuk performa maksimal
     c.execute('CREATE INDEX IF NOT EXISTS idx_absensi_tanggal ON absensi(tanggal)')
     c.execute('CREATE INDEX IF NOT EXISTS idx_absensi_anggota ON absensi(anggota_id)')
+    c.execute('CREATE INDEX IF NOT EXISTS idx_absensi_tanggal_anggota ON absensi(tanggal, anggota_id)')
+    c.execute('CREATE INDEX IF NOT EXISTS idx_anggota_aktif_role ON anggota(aktif, role)')
     
     c.execute('''CREATE TABLE IF NOT EXISTS event_log (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -242,6 +256,8 @@ def init_db():
         pesan TEXT,
         waktu TEXT NOT NULL
     )''')
+    
+    c.execute('CREATE INDEX IF NOT EXISTS idx_event_waktu ON event_log(id DESC)')
     
     c.execute('''CREATE TABLE IF NOT EXISTS login_attempts (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -465,6 +481,7 @@ def absensi_pulang():
 
 @app.route('/api/absensi/riwayat', methods=['GET'])
 def absensi_riwayat():
+    """Riwayat absensi — pakai RANGE query (lebih cepat dari LIKE)"""
     if 'user_id' not in session:
         return jsonify([]), 401
     user_id = session['user_id']
@@ -472,36 +489,44 @@ def absensi_riwayat():
     bulan = request.args.get('bulan', sekarang_wib().strftime('%Y-%m'))
     if len(bulan) != 7 or bulan[4] != '-':
         bulan = sekarang_wib().strftime('%Y-%m')
+    
+    bulan_next = hitung_bulan_next(bulan)
     filter_user = request.args.get('user_id')
     
     conn = get_db()
     c = conn.cursor()
+    
     if role == 'admin' and filter_user:
         try:
             filter_user = int(filter_user)
             c.execute('''SELECT a.id, a.tanggal, a.jam_masuk, a.jam_pulang, a.status, a.kegiatan,
                          k.nama, k.jabatan, k.id
                          FROM absensi a JOIN anggota k ON a.anggota_id = k.id
-                         WHERE a.tanggal LIKE ? AND a.anggota_id = ?
-                         ORDER BY a.tanggal DESC, a.jam_masuk DESC''', (bulan + '%', filter_user))
+                         WHERE a.tanggal >= ? AND a.tanggal < ? AND a.anggota_id = ?
+                         ORDER BY a.tanggal DESC, a.jam_masuk DESC
+                         LIMIT 500''', (bulan + '-01', bulan_next + '-01', filter_user))
         except:
             c.execute('''SELECT a.id, a.tanggal, a.jam_masuk, a.jam_pulang, a.status, a.kegiatan,
                          k.nama, k.jabatan, k.id
                          FROM absensi a JOIN anggota k ON a.anggota_id = k.id
-                         WHERE a.tanggal LIKE ?
-                         ORDER BY a.tanggal DESC, a.jam_masuk DESC''', (bulan + '%',))
+                         WHERE a.tanggal >= ? AND a.tanggal < ?
+                         ORDER BY a.tanggal DESC, a.jam_masuk DESC
+                         LIMIT 500''', (bulan + '-01', bulan_next + '-01'))
     elif role == 'admin':
         c.execute('''SELECT a.id, a.tanggal, a.jam_masuk, a.jam_pulang, a.status, a.kegiatan,
                      k.nama, k.jabatan, k.id
                      FROM absensi a JOIN anggota k ON a.anggota_id = k.id
-                     WHERE a.tanggal LIKE ?
-                     ORDER BY a.tanggal DESC, a.jam_masuk DESC''', (bulan + '%',))
+                     WHERE a.tanggal >= ? AND a.tanggal < ?
+                     ORDER BY a.tanggal DESC, a.jam_masuk DESC
+                     LIMIT 500''', (bulan + '-01', bulan_next + '-01'))
     else:
         c.execute('''SELECT a.id, a.tanggal, a.jam_masuk, a.jam_pulang, a.status, a.kegiatan,
                      k.nama, k.jabatan, k.id
                      FROM absensi a JOIN anggota k ON a.anggota_id = k.id
-                     WHERE a.tanggal LIKE ? AND a.anggota_id = ?
-                     ORDER BY a.tanggal DESC''', (bulan + '%', user_id))
+                     WHERE a.tanggal >= ? AND a.tanggal < ? AND a.anggota_id = ?
+                     ORDER BY a.tanggal DESC
+                     LIMIT 500''', (bulan + '-01', bulan_next + '-01', user_id))
+    
     rows = c.fetchall()
     conn.close()
     return jsonify([{
@@ -511,7 +536,7 @@ def absensi_riwayat():
 
 @app.route('/api/absensi/hari-ini', methods=['GET'])
 def absensi_hari_ini():
-    """Ambil absen hari ini dengan fallback UTC untuk data lama"""
+    """Absen hari ini dengan fallback UTC untuk data lama"""
     if 'user_id' not in session or session.get('role') != 'admin':
         return jsonify([]), 403
     
@@ -526,7 +551,8 @@ def absensi_hari_ini():
                  FROM absensi a JOIN anggota k ON a.anggota_id = k.id
                  WHERE (a.tanggal = ? OR a.tanggal = ? OR a.tanggal = ?) 
                  AND a.jam_masuk IS NOT NULL
-                 ORDER BY a.jam_masuk DESC''', (today_wib, today_utc, yesterday_wib))
+                 ORDER BY a.jam_masuk DESC
+                 LIMIT 100''', (today_wib, today_utc, yesterday_wib))
     rows = c.fetchall()
     conn.close()
     return jsonify([{
@@ -572,20 +598,27 @@ def events_riwayat():
     return jsonify([{'tipe': r[0], 'nama': r[1], 'pesan': r[2], 'waktu': r[3]} for r in rows])
 
 # ============================================================
-# REKAP
+# REKAP — Optimasi 1 Query Agregat
 # ============================================================
 @app.route('/api/rekap', methods=['GET'])
 def api_rekap():
+    """Rekap — pakai 1 query agregat (bukan N×4 query)"""
     if 'user_id' not in session or session.get('role') != 'admin':
         return jsonify({'success': False, 'rekap': [], 'hari_kerja': 0}), 403
     bulan = request.args.get('bulan', sekarang_wib().strftime('%Y-%m'))
     if len(bulan) != 7:
         bulan = sekarang_wib().strftime('%Y-%m')
     
+    bulan_next = hitung_bulan_next(bulan)
+    
     conn = get_db()
     c = conn.cursor()
+    
+    # Ambil daftar anggota aktif
     c.execute('SELECT id, nama, jabatan, divisi FROM anggota WHERE aktif = 1 ORDER BY nama')
     anggota_list = c.fetchall()
+    
+    # Hitung hari kerja (Senin-Sabtu)
     tahun, bln = map(int, bulan.split('-'))
     hari_kerja = 0
     for d in range(1, 32):
@@ -595,23 +628,42 @@ def api_rekap():
                 hari_kerja += 1
         except: break
     
+    # 1 QUERY AGREGAT untuk semua anggota
+    c.execute('''SELECT 
+                    anggota_id,
+                    SUM(CASE WHEN jam_masuk IS NOT NULL THEN 1 ELSE 0 END) as hadir,
+                    SUM(CASE WHEN status = 'Izin' THEN 1 ELSE 0 END) as izin,
+                    SUM(CASE WHEN status = 'Sakit' THEN 1 ELSE 0 END) as sakit,
+                    SUM(CASE WHEN status = 'Cuti' THEN 1 ELSE 0 END) as cuti
+                 FROM absensi
+                 WHERE tanggal >= ? AND tanggal < ?
+                 GROUP BY anggota_id''', (bulan + '-01', bulan_next + '-01'))
+    
+    rekap_map = {}
+    for row in c.fetchall():
+        rekap_map[row[0]] = {
+            'hadir': row[1] or 0,
+            'izin': row[2] or 0,
+            'sakit': row[3] or 0,
+            'cuti': row[4] or 0
+        }
+    conn.close()
+    
+    # Gabung dengan daftar anggota
     rekap = []
     for k in anggota_list:
         kid, nama, jabatan, divisi = k
-        c.execute('SELECT COUNT(*) FROM absensi WHERE anggota_id = ? AND tanggal LIKE ? AND jam_masuk IS NOT NULL', (kid, bulan + '%'))
-        hadir = c.fetchone()[0]
-        c.execute("SELECT COUNT(*) FROM absensi WHERE anggota_id = ? AND tanggal LIKE ? AND status = 'Izin'", (kid, bulan + '%'))
-        izin = c.fetchone()[0]
-        c.execute("SELECT COUNT(*) FROM absensi WHERE anggota_id = ? AND tanggal LIKE ? AND status = 'Sakit'", (kid, bulan + '%'))
-        sakit = c.fetchone()[0]
-        c.execute("SELECT COUNT(*) FROM absensi WHERE anggota_id = ? AND tanggal LIKE ? AND status = 'Cuti'", (kid, bulan + '%'))
-        cuti = c.fetchone()[0]
+        stats = rekap_map.get(kid, {'hadir': 0, 'izin': 0, 'sakit': 0, 'cuti': 0})
+        hadir = stats['hadir']
+        izin = stats['izin']
+        sakit = stats['sakit']
+        cuti = stats['cuti']
         alpha = max(0, hari_kerja - hadir - izin - sakit - cuti)
         rekap.append({
             'anggota_id': kid, 'nama': nama, 'jabatan': jabatan, 'divisi': divisi,
             'hadir': hadir, 'izin': izin, 'sakit': sakit, 'cuti': cuti, 'alpha': alpha
         })
-    conn.close()
+    
     return jsonify({'bulan': bulan, 'hari_kerja': hari_kerja, 'rekap': rekap})
 
 # ============================================================
@@ -624,12 +676,15 @@ def export_csv():
     bulan = request.args.get('bulan', sekarang_wib().strftime('%Y-%m'))
     if len(bulan) != 7:
         bulan = sekarang_wib().strftime('%Y-%m')
+    bulan_next = hitung_bulan_next(bulan)
+    
     conn = get_db()
     c = conn.cursor()
     c.execute('''SELECT k.no_anggota, k.nama, k.jabatan, k.divisi, a.tanggal, a.jam_masuk, a.jam_pulang, a.status
                  FROM absensi a JOIN anggota k ON a.anggota_id = k.id
-                 WHERE a.tanggal LIKE ?
-                 ORDER BY a.tanggal DESC, k.nama''', (bulan + '%',))
+                 WHERE a.tanggal >= ? AND a.tanggal < ?
+                 ORDER BY a.tanggal DESC, k.nama
+                 LIMIT 1000''', (bulan + '-01', bulan_next + '-01'))
     rows = c.fetchall()
     conn.close()
     output = io.StringIO()
@@ -649,12 +704,15 @@ def export_pdf():
     bulan = request.args.get('bulan', sekarang_wib().strftime('%Y-%m'))
     if len(bulan) != 7:
         bulan = sekarang_wib().strftime('%Y-%m')
+    bulan_next = hitung_bulan_next(bulan)
+    
     conn = get_db()
     c = conn.cursor()
     c.execute('''SELECT k.no_anggota, k.nama, k.jabatan, k.divisi, a.tanggal, a.jam_masuk, a.jam_pulang, a.status
                  FROM absensi a JOIN anggota k ON a.anggota_id = k.id
-                 WHERE a.tanggal LIKE ?
-                 ORDER BY a.tanggal DESC, k.nama''', (bulan + '%',))
+                 WHERE a.tanggal >= ? AND a.tanggal < ?
+                 ORDER BY a.tanggal DESC, k.nama
+                 LIMIT 1000''', (bulan + '-01', bulan_next + '-01'))
     rows = c.fetchall()
     conn.close()
     th, bl = bulan.split('-')
@@ -833,7 +891,7 @@ init_db()
 
 
 # ============================================================
-# LOGIN PAGE — BLACK & GOLD (NO EXTERNAL FONTS)
+# LOGIN PAGE
 # ============================================================
 LOGIN_HTML = r"""
 <!DOCTYPE html>
@@ -872,13 +930,8 @@ body::before {
     background-size: 32px 32px;
     pointer-events: none;
 }
-
 .login-container { width: 100%; max-width: 440px; position: relative; z-index: 1; }
-
-.org-header {
-    text-align: center;
-    margin-bottom: 28px;
-}
+.org-header { text-align: center; margin-bottom: 28px; }
 .org-badge {
     display: inline-block;
     padding: 6px 18px;
@@ -918,12 +971,7 @@ body::before {
     font-weight: 600;
     margin-bottom: 6px;
 }
-.org-loc {
-    font-size: 11px;
-    color: #6b7280;
-    letter-spacing: 1px;
-}
-
+.org-loc { font-size: 11px; color: #6b7280; letter-spacing: 1px; }
 .login-card {
     background: linear-gradient(145deg, #161616 0%, #0f0f0f 100%);
     border: 1px solid #262626;
@@ -939,19 +987,16 @@ body::before {
     content: '';
     position: absolute;
     top: -1px;
-    left: 30%;
-    right: 30%;
+    left: 30%; right: 30%;
     height: 1px;
     background: linear-gradient(90deg, transparent, #b45309, transparent);
 }
-
 .login-title {
     font-size: 20px;
     font-weight: 700;
     color: #f9fafb;
     margin-bottom: 6px;
     font-family: Georgia, serif;
-    letter-spacing: 0.5px;
 }
 .login-desc {
     font-size: 12.5px;
@@ -959,7 +1004,6 @@ body::before {
     margin-bottom: 26px;
     line-height: 1.6;
 }
-
 .form-row { margin-bottom: 18px; }
 .form-row label {
     display: block;
@@ -988,7 +1032,6 @@ body::before {
     box-shadow: 0 0 0 3px rgba(180,83,9,0.15);
 }
 .form-row input::placeholder { color: #4b5563; }
-
 .btn-submit {
     width: 100%;
     padding: 14px;
@@ -1011,7 +1054,6 @@ body::before {
     box-shadow: 0 6px 24px -4px rgba(251,191,36,0.6);
     transform: translateY(-1px);
 }
-.btn-submit:active { transform: translateY(0); }
 .btn-submit:disabled { 
     background: #374151; 
     color: #6b7280;
@@ -1019,7 +1061,6 @@ body::before {
     cursor: not-allowed;
     transform: none;
 }
-
 .error-msg {
     background: rgba(220,38,38,0.1);
     border: 1px solid rgba(220,38,38,0.3);
@@ -1030,20 +1071,16 @@ body::before {
     font-size: 12.5px;
     margin-bottom: 18px;
     display: none;
-    line-height: 1.5;
 }
 .error-msg.show { display: block; }
-
 .footer-text {
     text-align: center;
     margin-top: 28px;
     font-size: 10.5px;
     color: #4b5563;
     letter-spacing: 1px;
-    line-height: 1.8;
 }
 .footer-text .sep { padding: 0 8px; color: #b45309; }
-
 @media (max-width: 480px) {
     body { padding: 16px; }
     .org-name { font-size: 34px; }
@@ -1146,7 +1183,7 @@ async function doLogin(e) {
 
 
 # ============================================================
-# MAIN PAGE — BLACK & GOLD (OPTIMIZED)
+# MAIN PAGE
 # ============================================================
 MAIN_HTML = r"""
 <!DOCTYPE html>
@@ -1165,8 +1202,6 @@ MAIN_HTML = r"""
     --gold-500: #fbbf24;
     --gold-600: #d97706;
     --gold-700: #b45309;
-    --gold-800: #92400e;
-    --gold-50: #fef3c7;
     --border-dark: #262626;
     --border-mid: #333333;
     --text-primary: #f9fafb;
@@ -1201,7 +1236,6 @@ body {
     height: 100vh;
     height: 100dvh;
 }
-
 .app-header {
     background: var(--black-800);
     color: white;
@@ -1246,7 +1280,7 @@ body {
     font-size: 12px;
     letter-spacing: 0.5px;
     flex-shrink: 0;
-    font-family: 'SF Mono', Consolas, 'Courier New', monospace;
+    font-family: 'SF Mono', Consolas, monospace;
     background: rgba(180,83,9,0.08);
 }
 .app-brand .text { line-height: 1.15; min-width: 0; }
@@ -1267,7 +1301,6 @@ body {
     text-transform: uppercase;
     letter-spacing: 1.2px;
     white-space: nowrap;
-    font-weight: 500;
 }
 .app-nav {
     display: flex;
@@ -1304,7 +1337,6 @@ body {
     color: var(--gold-500);
     border-bottom-color: var(--gold-600);
 }
-.nav-item svg { flex-shrink: 0; }
 .app-user {
     display: flex;
     align-items: center;
@@ -1355,7 +1387,6 @@ body {
     border-color: var(--gold-600);
     color: var(--gold-500);
 }
-
 .app-main {
     flex: 1;
     overflow: hidden;
@@ -1381,7 +1412,6 @@ body {
     width: 100%;
     min-height: 100%;
 }
-
 .page-header {
     display: flex;
     justify-content: space-between;
@@ -1422,7 +1452,6 @@ body {
     font-size: 12px;
     color: var(--text-muted);
 }
-
 .greeting {
     background: linear-gradient(135deg, var(--black-700) 0%, var(--black-800) 100%);
     border: 1px solid var(--border-dark);
@@ -1456,7 +1485,6 @@ body {
     font-size: 12px;
     color: var(--text-muted);
 }
-
 .clock-card {
     background: linear-gradient(135deg, var(--black-700) 0%, var(--black-800) 100%);
     color: white;
@@ -1490,7 +1518,7 @@ body {
     margin-bottom: 14px;
 }
 .clock-time {
-    font-family: 'SF Mono', Consolas, 'Courier New', monospace;
+    font-family: 'SF Mono', Consolas, monospace;
     font-size: 56px;
     font-weight: 600;
     line-height: 1;
@@ -1504,9 +1532,7 @@ body {
     font-size: 13px;
     color: var(--text-muted);
     font-weight: 500;
-    letter-spacing: 0.5px;
 }
-
 .att-card {
     background: var(--black-800);
     border: 1px solid var(--border-dark);
@@ -1547,14 +1573,13 @@ body {
 }
 .att-status-cell:last-child .lbl::before { background: var(--gold-500); }
 .att-status-cell .val {
-    font-family: 'SF Mono', Consolas, 'Courier New', monospace;
+    font-family: 'SF Mono', Consolas, monospace;
     font-size: 26px;
     font-weight: 600;
     color: var(--gold-500);
     line-height: 1.1;
 }
 .att-status-cell .val.empty { color: var(--text-dim); }
-
 .att-buttons {
     display: grid;
     grid-template-columns: 1fr 1fr;
@@ -1592,7 +1617,6 @@ body {
     transform: translateY(-2px);
     box-shadow: 0 12px 30px -8px rgba(251,191,36,0.6);
 }
-
 .btn-out { 
     background: var(--black-600);
     border: 1.5px solid var(--gold-700);
@@ -1609,7 +1633,6 @@ body {
     border-color: var(--gold-500);
     transform: translateY(-2px);
 }
-
 .btn-clock:disabled {
     background: var(--black-500);
     border-color: var(--border-dark);
@@ -1624,7 +1647,6 @@ body {
 }
 .btn-clock:disabled .label { color: var(--text-dim); }
 .btn-clock:disabled .time { color: var(--text-dim); }
-
 .btn-clock .icon-wrap {
     width: 48px;
     height: 48px;
@@ -1644,7 +1666,6 @@ body {
     font-size: 14px;
     font-weight: 600;
 }
-
 .card {
     background: var(--black-800);
     border: 1px solid var(--border-dark);
@@ -1690,7 +1711,6 @@ body {
     overflow-y: auto;
     -webkit-overflow-scrolling: touch;
 }
-
 .table-wrap { overflow-x: auto; -webkit-overflow-scrolling: touch; }
 table { width: 100%; border-collapse: collapse; min-width: 520px; }
 thead th {
@@ -1722,7 +1742,6 @@ tbody td strong { color: var(--text-primary); font-weight: 700; }
 .right { text-align: right; }
 .center { text-align: center; }
 .muted { color: var(--text-muted); }
-
 .badge {
     display: inline-block;
     padding: 4px 10px;
@@ -1740,7 +1759,6 @@ tbody td strong { color: var(--text-primary); font-weight: 700; }
 .badge-alpha { background: var(--danger-bg); color: var(--danger); border: 1px solid rgba(239,68,68,0.3); }
 .badge-aktif { background: var(--success-bg); color: var(--success); border: 1px solid rgba(16,185,129,0.3); }
 .badge-nonaktif { background: rgba(107,114,128,0.15); color: var(--text-dim); border: 1px solid var(--border-dark); }
-
 .btn {
     padding: 10px 16px;
     border: 1px solid var(--border-mid);
@@ -1797,7 +1815,6 @@ tbody td strong { color: var(--text-primary); font-weight: 700; }
     font-size: 13px;
     min-height: 34px;
 }
-
 .form-row { margin-bottom: 16px; }
 .form-row label {
     display: block;
@@ -1826,7 +1843,6 @@ tbody td strong { color: var(--text-primary); font-weight: 700; }
     box-shadow: 0 0 0 3px rgba(180,83,9,0.15);
 }
 .form-row input::placeholder { color: var(--text-dim); }
-
 .toolbar {
     display: flex;
     gap: 10px;
@@ -1852,7 +1868,6 @@ tbody td strong { color: var(--text-primary); font-weight: 700; }
 .toolbar input::placeholder { color: var(--text-dim); }
 .toolbar input { flex: 1; min-width: 180px; }
 .toolbar select { min-width: 150px; }
-
 .stats-row {
     display: grid;
     grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
@@ -1904,9 +1919,7 @@ tbody td strong { color: var(--text-primary); font-weight: 700; }
     margin-left: 6px;
     font-weight: 500;
     font-family: inherit;
-    letter-spacing: 0;
 }
-
 .live-grid {
     display: grid;
     grid-template-columns: 1fr 1fr;
@@ -1938,7 +1951,6 @@ tbody td strong { color: var(--text-primary); font-weight: 700; }
     0%, 100% { opacity: 1; }
     50% { opacity: 0.3; }
 }
-
 .event-item {
     padding: 13px 18px;
     border-bottom: 1px solid var(--border-dark);
@@ -1994,7 +2006,6 @@ tbody td strong { color: var(--text-primary); font-weight: 700; }
     flex-shrink: 0;
     font-weight: 600;
 }
-
 .modal {
     display: none;
     position: fixed;
@@ -2079,7 +2090,6 @@ tbody td strong { color: var(--text-primary); font-weight: 700; }
     gap: 10px;
     justify-content: flex-end;
 }
-
 .toast {
     position: fixed;
     top: calc(80px + var(--safe-top));
@@ -2108,14 +2118,19 @@ tbody td strong { color: var(--text-primary); font-weight: 700; }
 .toast.error { border-left: 3px solid var(--danger); }
 .toast.info { border-left: 3px solid var(--info); }
 .toast.warning { border-left: 3px solid var(--warning); }
-
 .empty-state {
     padding: 48px 20px;
     text-align: center;
     color: var(--text-dim);
     font-size: 12.5px;
 }
-
+.loading-state {
+    padding: 48px 20px;
+    text-align: center;
+    color: var(--gold-600);
+    font-size: 12.5px;
+    font-weight: 600;
+}
 @media (max-width: 1024px) {
     .page { padding: 18px; gap: 14px; }
     .live-grid { grid-template-columns: 1fr; }
@@ -2719,10 +2734,8 @@ window.addEventListener('load', async () => {
     
     if (data.role === 'admin') {
         switchView('dashboard');
-        // Load hanya data yang dibutuhkan — load yang lain saat tab dibuka
         loadDashboard();
         muatRiwayatEvent();
-        // Realtime di-delay biar tidak blocking initial load
         setTimeout(() => setupRealtime(), 1200);
     } else {
         switchView('absen');
@@ -2879,7 +2892,6 @@ async function muatRiwayatEvent() {
 async function loadDashboard() {
     try {
         const dataHariIni = await fetchJSON('/api/absensi/hari-ini') || [];
-        // Pakai cache kalau ada
         let semuaAnggota = cacheAnggota;
         if (!semuaAnggota) {
             semuaAnggota = await fetchJSON('/api/anggota') || [];
@@ -2967,14 +2979,17 @@ async function absenPulang() {
 }
 
 async function loadRiwayatAnggota() {
+    const tbody = document.getElementById('riwayatBodyAnggota');
+    tbody.innerHTML = '<tr><td colspan="4" class="loading-state">⏳ Memuat riwayat...</td></tr>';
+    
     const bulan = document.getElementById('filterBulanAnggota').value || new Date().toISOString().slice(0, 7);
     const data = await fetchJSON('/api/absensi/riwayat?bulan=' + bulan) || [];
-    const tbody = document.getElementById('riwayatBodyAnggota');
+    
     if (data.length === 0) {
         tbody.innerHTML = '<tr><td colspan="4" class="empty-state">Belum ada riwayat absen untuk periode ini</td></tr>';
         return;
     }
-    tbody.innerHTML = '';
+    const fragment = document.createDocumentFragment();
     data.forEach(r => {
         const row = document.createElement('tr');
         row.innerHTML = `
@@ -2983,8 +2998,10 @@ async function loadRiwayatAnggota() {
             <td data-label="Pulang" class="center mono">${r.jam_pulang}</td>
             <td data-label="Status"><span class="badge badge-${r.status.toLowerCase()}">${r.status}</span></td>
         `;
-        tbody.appendChild(row);
+        fragment.appendChild(row);
     });
+    tbody.innerHTML = '';
+    tbody.appendChild(fragment);
 }
 
 async function loadAnggota(forceRefresh = false) {
@@ -3022,7 +3039,7 @@ function renderAnggota() {
         tbody.innerHTML = '<tr><td colspan="7" class="empty-state">Tidak ada anggota ditemukan</td></tr>';
         return;
     }
-    tbody.innerHTML = '';
+    const fragment = document.createDocumentFragment();
     filtered.forEach(k => {
         const row = document.createElement('tr');
         row.innerHTML = `
@@ -3039,8 +3056,10 @@ function renderAnggota() {
                 </div>
             </td>
         `;
-        tbody.appendChild(row);
+        fragment.appendChild(row);
     });
+    tbody.innerHTML = '';
+    tbody.appendChild(fragment);
 }
 
 function escapeHtml(text) {
@@ -3146,18 +3165,22 @@ async function hapusAnggota(id, nama) {
 }
 
 async function loadSemuaAbsen() {
+    const tbody = document.getElementById('semuaBody');
+    tbody.innerHTML = '<tr><td colspan="6" class="loading-state">⏳ Memuat data kehadiran...</td></tr>';
+    
     const bulan = document.getElementById('filterBulanSemua').value || new Date().toISOString().slice(0, 7);
     const userId = document.getElementById('filterAnggotaSemua').value;
     let url = '/api/absensi/riwayat?bulan=' + bulan;
     if (userId) url += '&user_id=' + userId;
     const data = await fetchJSON(url) || [];
     document.getElementById('totalAbsen').textContent = data.length;
-    const tbody = document.getElementById('semuaBody');
+    
     if (data.length === 0) {
         tbody.innerHTML = '<tr><td colspan="6" class="empty-state">Belum ada data absensi untuk periode ini</td></tr>';
         return;
     }
-    tbody.innerHTML = '';
+    
+    const fragment = document.createDocumentFragment();
     data.forEach(r => {
         const row = document.createElement('tr');
         row.innerHTML = `
@@ -3168,23 +3191,33 @@ async function loadSemuaAbsen() {
             <td data-label="Pulang" class="center mono">${r.jam_pulang}</td>
             <td data-label="Status"><span class="badge badge-${r.status.toLowerCase()}">${r.status}</span></td>
         `;
-        tbody.appendChild(row);
+        fragment.appendChild(row);
     });
+    tbody.innerHTML = '';
+    tbody.appendChild(fragment);
 }
 
 async function loadRekap() {
+    const tbody = document.getElementById('rekapBody');
+    tbody.innerHTML = '<tr><td colspan="8" class="loading-state">⏳ Menghitung rekap...</td></tr>';
+    
     const bulan = document.getElementById('filterBulanRekap').value || new Date().toISOString().slice(0, 7);
     const data = await fetchJSON('/api/rekap?bulan=' + bulan);
-    if (!data) return;
+    
+    if (!data) {
+        tbody.innerHTML = '<tr><td colspan="8" class="empty-state">Gagal memuat data</td></tr>';
+        return;
+    }
     document.getElementById('statHariKerja').innerHTML = data.hari_kerja + '<span class="unit">hari</span>';
     document.getElementById('statTotalAnggotaRekap').innerHTML = data.rekap.length + '<span class="unit">orang</span>';
     document.getElementById('statTotalHadir').innerHTML = data.rekap.reduce((s, r) => s + r.hadir, 0) + '<span class="unit">hari</span>';
-    const tbody = document.getElementById('rekapBody');
+    
     if (data.rekap.length === 0) {
         tbody.innerHTML = '<tr><td colspan="8" class="empty-state">Belum ada data untuk periode ini</td></tr>';
         return;
     }
-    tbody.innerHTML = '';
+    
+    const fragment = document.createDocumentFragment();
     data.rekap.forEach(r => {
         const persen = data.hari_kerja > 0 ? Math.round((r.hadir / data.hari_kerja) * 100) : 0;
         const row = document.createElement('tr');
@@ -3198,8 +3231,10 @@ async function loadRekap() {
             <td data-label="Alpha" class="center mono" style="color:var(--danger);font-weight:700;">${r.alpha}</td>
             <td data-label="Kehadiran" class="center"><strong class="mono">${persen}%</strong></td>
         `;
-        tbody.appendChild(row);
+        fragment.appendChild(row);
     });
+    tbody.innerHTML = '';
+    tbody.appendChild(fragment);
 }
 
 function exportCSV() {
@@ -3244,12 +3279,14 @@ if __name__ == '__main__':
     print(f"  {ORG['desa']}")
     print("=" * 70)
     print()
-    print("  ⚡ OPTIMIZED BLACK & GOLD v5.0")
-    print("  - Sistem font (loading instan)")
-    print("  - Lazy load tabs (hemat resource)")
-    print("  - Cache data anggota (30s)")
-    print("  - SQLite WAL mode (query cepat)")
-    print("  - Realtime delayed (tidak blocking)")
+    print("  ⚡ OPTIMIZED v6.0 — SUPER FAST")
+    print("  - Query pakai range tanggal (bukan LIKE)")
+    print("  - Index gabungan (tanggal, anggota)")
+    print("  - Rekap 1 query agregat (bukan N×4)")
+    print("  - LIMIT 500 (tidak fetch berlebihan)")
+    print("  - Loading indicator di setiap tab")
+    print("  - DocumentFragment untuk render cepat")
+    print("  - SQLite WAL mode + 64MB cache")
     print()
     
     port = int(os.environ.get('PORT', 5000))
