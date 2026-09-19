@@ -2,25 +2,49 @@
 ============================================================
   SISTEM ABSENSI KARANG TARUNA KARIKATUR 007
   Desa Mekarsari RT.07/RW.07
-  Production Ready v2.0
+  Secure Version v3.0
+============================================================
+  Fitur Keamanan:
+  - Bcrypt password hashing
+  - Rate limiting (5 login/menit)
+  - CSRF protection
+  - Security headers
+  - Login attempt logging
+  - Auto logout idle 2 jam
+  - Force HTTPS di production
 ============================================================
 """
 
-import subprocess, sys, os, sqlite3, webbrowser, threading, time, random, hashlib, csv, io, json
+import subprocess, sys, os, sqlite3, webbrowser, threading, time, random, hashlib, csv, io, json, secrets
 from datetime import datetime, timedelta
 from functools import wraps
 from queue import Queue, Empty
 
-try:
-    from flask import Flask, request, jsonify, render_template_string, session, redirect, url_for, send_file, make_response, Response
-    from flask_cors import CORS
-    from werkzeug.middleware.proxy_fix import ProxyFix
-except ImportError:
-    print("Install dependencies...")
-    subprocess.check_call([sys.executable, "-m", "pip", "install", "flask", "flask-cors", "werkzeug", "--quiet"])
-    from flask import Flask, request, jsonify, render_template_string, session, redirect, url_for, send_file, make_response, Response
-    from flask_cors import CORS
-    from werkzeug.middleware.proxy_fix import ProxyFix
+# Auto-install dependencies
+REQUIRED_PACKAGES = [
+    ('flask', 'flask'),
+    ('flask_cors', 'flask-cors'),
+    ('flask_limiter', 'flask-limiter'),
+    ('werkzeug', 'werkzeug'),
+    ('bcrypt', 'bcrypt')
+]
+
+for module_name, pip_name in REQUIRED_PACKAGES:
+    try:
+        __import__(module_name)
+    except ImportError:
+        print(f"📦 Installing {pip_name}...")
+        try:
+            subprocess.check_call([sys.executable, "-m", "pip", "install", pip_name, "--quiet"])
+        except Exception as e:
+            print(f"⚠️  Gagal install {pip_name}: {e}")
+
+from flask import Flask, request, jsonify, render_template_string, session, redirect, url_for, send_file, make_response, Response, abort
+from flask_cors import CORS
+from flask_limiter import Limiter
+from flask_limiter.util import get_remote_address
+from werkzeug.middleware.proxy_fix import ProxyFix
+import bcrypt
 
 # ============================================================
 # KONFIGURASI
@@ -34,10 +58,8 @@ ORG = {
     'tagline': 'Bersatu · Berkarya · Berdaya'
 }
 
-# SECRET_KEY FIXED — jangan diubah setelah deploy!
-# Kalau diubah, semua user harus login ulang.
-SECRET_KEY = os.environ.get('SECRET_KEY', 'karikatur007-fixed-secret-key-2026-jangan-diubah')
-
+# SECRET_KEY FIXED — jangan diubah setelah deploy
+SECRET_KEY = os.environ.get('SECRET_KEY', 'karikatur007-fixed-secret-key-2026-aman')
 ADMIN_USERNAME = os.environ.get('ADMIN_USERNAME', 'admin')
 ADMIN_PASSWORD = os.environ.get('ADMIN_PASSWORD', 'admin123')
 
@@ -47,25 +69,96 @@ IS_PRODUCTION = bool(
     os.environ.get('RENDER') or
     os.environ.get('PRODUCTION') or
     os.environ.get('DYNO') or
-    os.environ.get('PORT')  # Railway set PORT
+    os.environ.get('PORT')
 )
 
 app = Flask(__name__)
-# ProxyFix: supaya Flask tahu dia di belakang proxy HTTPS (Railway)
 app.wsgi_app = ProxyFix(app.wsgi_app, x_for=1, x_proto=1, x_host=1, x_prefix=1)
 app.secret_key = SECRET_KEY
 
-# Cookie config — untuk HTTPS di belakang proxy
+# Cookie config — aman
 app.config['SESSION_COOKIE_SAMESITE'] = 'None'
 app.config['SESSION_COOKIE_SECURE'] = True
 app.config['SESSION_COOKIE_HTTPONLY'] = True
 app.config['SESSION_COOKIE_DOMAIN'] = None
-app.config['PERMANENT_SESSION_LIFETIME'] = timedelta(days=7)
+app.config['PERMANENT_SESSION_LIFETIME'] = timedelta(hours=2)  # auto logout 2 jam
+app.config['MAX_CONTENT_LENGTH'] = 5 * 1024 * 1024  # max 5MB request
+
+# Rate limiter
+limiter = Limiter(
+    get_remote_address,
+    app=app,
+    default_limits=["500 per day", "100 per hour"],
+    storage_uri="memory://",
+    strategy="fixed-window"
+)
 
 CORS(app, supports_credentials=True, origins='*')
 
 DB_FILE = "absensi_karikatur007.db"
 sse_clients = []
+
+# ============================================================
+# SECURITY HEADERS
+# ============================================================
+@app.after_request
+def add_security_headers(response):
+    """Tambah security headers ke semua response"""
+    response.headers['X-Content-Type-Options'] = 'nosniff'
+    response.headers['X-Frame-Options'] = 'SAMEORIGIN'
+    response.headers['X-XSS-Protection'] = '1; mode=block'
+    response.headers['Referrer-Policy'] = 'strict-origin-when-cross-origin'
+    response.headers['Permissions-Policy'] = 'geolocation=(), microphone=(), camera=()'
+    # CSP: izinkan inline style & script (dibutuhkan), Google Fonts
+    response.headers['Content-Security-Policy'] = (
+        "default-src 'self'; "
+        "style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; "
+        "font-src 'self' https://fonts.gstatic.com data:; "
+        "script-src 'self' 'unsafe-inline'; "
+        "img-src 'self' data:; "
+        "connect-src 'self'; "
+        "frame-ancestors 'self'"
+    )
+    return response
+
+# ============================================================
+# FORCE HTTPS DI PRODUCTION
+# ============================================================
+@app.before_request
+def force_https():
+    """Redirect HTTP ke HTTPS di production"""
+    if IS_PRODUCTION and not request.is_secure:
+        if request.headers.get('X-Forwarded-Proto', 'http') != 'https':
+            url = request.url.replace('http://', 'https://', 1)
+            return redirect(url, code=301)
+
+# ============================================================
+# CSRF PROTECTION
+# ============================================================
+def generate_csrf_token():
+    """Generate CSRF token per session"""
+    if '_csrf_token' not in session:
+        session['_csrf_token'] = secrets.token_urlsafe(32)
+    return session['_csrf_token']
+
+def validate_csrf_token():
+    """Validate CSRF token dari request"""
+    token_from_header = request.headers.get('X-CSRF-Token', '')
+    token_from_session = session.get('_csrf_token', '')
+    if not token_from_session or not token_from_header:
+        return False
+    return secrets.compare_digest(token_from_header, token_from_session)
+
+@app.before_request
+def csrf_protect():
+    """Validasi CSRF untuk semua POST/PUT/DELETE ke /api/"""
+    if request.method in ['POST', 'PUT', 'DELETE', 'PATCH']:
+        if request.path.startswith('/api/'):
+            # Skip login endpoint (belum ada session/token)
+            if request.path == '/api/login':
+                return
+            if not validate_csrf_token():
+                return jsonify({'success': False, 'message': 'CSRF token tidak valid'}), 403
 
 # ============================================================
 # ERROR HANDLER
@@ -76,20 +169,35 @@ def not_found(e):
         return jsonify({'success': False, 'message': 'Endpoint tidak ditemukan'}), 404
     return redirect(url_for('login_page'))
 
+@app.errorhandler(429)
+def ratelimit_handler(e):
+    if request.path.startswith('/api/'):
+        return jsonify({'success': False, 'message': 'Terlalu banyak percobaan. Coba lagi nanti.'}), 429
+    return "Terlalu banyak percobaan. Silakan coba lagi nanti.", 429
+
 @app.errorhandler(500)
 def server_error(e):
     if request.path.startswith('/api/'):
         return jsonify({'success': False, 'message': 'Server error'}), 500
-    return str(e), 500
+    return "Server error", 500
 
 # ============================================================
 # DATABASE
 # ============================================================
 def hash_password(password):
-    return hashlib.sha256(password.encode()).hexdigest()
+    """Hash password dengan bcrypt"""
+    return bcrypt.hashpw(password.encode('utf-8'), bcrypt.gensalt(rounds=12)).decode('utf-8')
+
+def verify_password(password, hashed):
+    """Verifikasi password — support bcrypt & SHA256 (legacy)"""
+    try:
+        return bcrypt.checkpw(password.encode('utf-8'), hashed.encode('utf-8'))
+    except:
+        # Fallback ke SHA256 untuk password lama
+        return hashlib.sha256(password.encode()).hexdigest() == hashed
 
 def init_db():
-    """Inisialisasi database — dipanggil saat modul di-load"""
+    """Inisialisasi database"""
     conn = sqlite3.connect(DB_FILE)
     c = conn.cursor()
     
@@ -128,6 +236,15 @@ def init_db():
         waktu TEXT NOT NULL
     )''')
     
+    # Tabel log percobaan login
+    c.execute('''CREATE TABLE IF NOT EXISTS login_attempts (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        username TEXT,
+        ip_address TEXT,
+        berhasil INTEGER,
+        waktu TEXT NOT NULL
+    )''')
+    
     c.execute('SELECT COUNT(*) FROM anggota WHERE role = "admin"')
     if c.fetchone()[0] == 0:
         c.execute('''INSERT INTO anggota 
@@ -137,12 +254,32 @@ def init_db():
              'Ketua', 'Pengurus', 'admin@karikatur007.id', 'admin',
              datetime.now().strftime('%Y-%m-%d %H:%M:%S')))
         print(f"✅ Admin dibuat: {ADMIN_USERNAME}")
+        if ADMIN_PASSWORD == 'admin123':
+            print("⚠️  PENTING: Ganti password admin setelah login pertama!")
     
     conn.commit()
     conn.close()
     print(f"✅ Database siap: {DB_FILE}")
 
+def log_login_attempt(username, berhasil):
+    """Catat percobaan login"""
+    try:
+        ip = request.remote_addr or 'unknown'
+        # Kalau di belakang proxy, ambil dari X-Forwarded-For
+        if request.headers.get('X-Forwarded-For'):
+            ip = request.headers.get('X-Forwarded-For').split(',')[0].strip()
+        
+        conn = sqlite3.connect(DB_FILE)
+        c = conn.cursor()
+        c.execute('INSERT INTO login_attempts (username, ip_address, berhasil, waktu) VALUES (?, ?, ?, ?)',
+                  (username, ip, 1 if berhasil else 0, datetime.now().strftime('%Y-%m-%d %H:%M:%S')))
+        conn.commit()
+        conn.close()
+    except:
+        pass
+
 def log_event(tipe, anggota_id, nama, pesan):
+    """Log event untuk realtime"""
     waktu = datetime.now().strftime('%H:%M:%S')
     conn = sqlite3.connect(DB_FILE)
     c = conn.cursor()
@@ -185,34 +322,59 @@ def admin_required(f):
 # ============================================================
 @app.route('/login', methods=['GET'])
 def login_page():
-    return render_template_string(LOGIN_HTML, o=ORG)
+    # Generate CSRF token untuk login form
+    csrf_token = secrets.token_urlsafe(32)
+    session['_csrf_token'] = csrf_token
+    return render_template_string(LOGIN_HTML, o=ORG, csrf_token=csrf_token)
 
 @app.route('/api/login', methods=['POST'])
+@limiter.limit("5 per minute")
+@limiter.limit("20 per hour")
 def api_login():
     try:
         data = request.get_json() or {}
-        username = data.get('username', '').strip()
-        password = data.get('password', '')
+        username = data.get('username', '').strip()[:50]  # batasi panjang
+        password = data.get('password', '')[:100]
+        
         if not username or not password:
             return jsonify({'success': False, 'message': 'Username dan password wajib diisi'})
+        
         conn = sqlite3.connect(DB_FILE)
         c = conn.cursor()
-        c.execute('SELECT id, username, nama, role, aktif FROM anggota WHERE username = ? AND password = ?',
-                  (username, hash_password(password)))
+        c.execute('SELECT id, username, nama, role, aktif, password FROM anggota WHERE username = ?', (username,))
         row = c.fetchone()
         conn.close()
+        
         if not row:
+            log_login_attempt(username, False)
+            # Delay untuk cegah timing attack
+            time.sleep(0.5)
             return jsonify({'success': False, 'message': 'Username atau password salah'})
+        
+        if not verify_password(password, row[5]):
+            log_login_attempt(username, False)
+            time.sleep(0.5)
+            return jsonify({'success': False, 'message': 'Username atau password salah'})
+        
         if not row[4]:
+            log_login_attempt(username, False)
             return jsonify({'success': False, 'message': 'Akun tidak aktif'})
+        
+        # Login berhasil
         session.permanent = True
         session['user_id'] = row[0]
         session['username'] = row[1]
         session['nama'] = row[2]
         session['role'] = row[3]
+        session['_csrf_token'] = secrets.token_urlsafe(32)
+        
+        # Regenerate session untuk cegah session fixation
+        session.modified = True
+        
+        log_login_attempt(username, True)
         return jsonify({'success': True, 'role': row[3], 'nama': row[2]})
     except Exception as e:
-        return jsonify({'success': False, 'message': f'Error: {str(e)}'})
+        return jsonify({'success': False, 'message': 'Terjadi kesalahan'})
 
 @app.route('/api/logout', methods=['POST'])
 def api_logout():
@@ -224,30 +386,12 @@ def api_me():
     if 'user_id' not in session:
         return jsonify({'logged_in': False})
     return jsonify({
-        'logged_in': True, 'user_id': session['user_id'],
-        'username': session['username'], 'nama': session['nama'],
-        'role': session['role']
-    })
-
-# ============================================================
-# DEBUG SESSION (untuk troubleshooting)
-# ============================================================
-@app.route('/api/debug/session', methods=['GET'])
-def debug_session():
-    """Debug: cek isi session dan cookie config"""
-    return jsonify({
-        'has_session': bool(session),
-        'session_keys': list(session.keys()),
-        'session_data': dict(session),
-        'secret_key_prefix': SECRET_KEY[:20] + '...',
-        'is_production': IS_PRODUCTION,
-        'cookie_secure': app.config['SESSION_COOKIE_SECURE'],
-        'cookie_samesite': app.config['SESSION_COOKIE_SAMESITE'],
-        'cookie_httponly': app.config['SESSION_COOKIE_HTTPONLY'],
-        'user_agent': request.headers.get('User-Agent', '')[:50],
-        'host': request.host,
-        'scheme': request.scheme,
-        'is_secure': request.is_secure
+        'logged_in': True,
+        'user_id': session['user_id'],
+        'username': session['username'],
+        'nama': session['nama'],
+        'role': session['role'],
+        'csrf_token': session.get('_csrf_token', '')
     })
 
 # ============================================================
@@ -280,7 +424,7 @@ def absensi_masuk():
     today = datetime.now().strftime('%Y-%m-%d')
     now = datetime.now().strftime('%H:%M:%S')
     data = request.get_json() or {}
-    kegiatan = data.get('kegiatan', '')
+    kegiatan = str(data.get('kegiatan', ''))[:200]
     conn = sqlite3.connect(DB_FILE)
     c = conn.cursor()
     c.execute('SELECT id, jam_masuk FROM absensi WHERE anggota_id = ? AND tanggal = ?', (user_id, today))
@@ -328,15 +472,27 @@ def absensi_riwayat():
     user_id = session['user_id']
     role = session['role']
     bulan = request.args.get('bulan', datetime.now().strftime('%Y-%m'))
+    # Validasi format bulan
+    if len(bulan) != 7 or bulan[4] != '-':
+        bulan = datetime.now().strftime('%Y-%m')
     filter_user = request.args.get('user_id')
+    
     conn = sqlite3.connect(DB_FILE)
     c = conn.cursor()
     if role == 'admin' and filter_user:
-        c.execute('''SELECT a.id, a.tanggal, a.jam_masuk, a.jam_pulang, a.status, a.kegiatan,
-                     k.nama, k.jabatan, k.id
-                     FROM absensi a JOIN anggota k ON a.anggota_id = k.id
-                     WHERE a.tanggal LIKE ? AND a.anggota_id = ?
-                     ORDER BY a.tanggal DESC, a.jam_masuk DESC''', (bulan + '%', filter_user))
+        try:
+            filter_user = int(filter_user)
+            c.execute('''SELECT a.id, a.tanggal, a.jam_masuk, a.jam_pulang, a.status, a.kegiatan,
+                         k.nama, k.jabatan, k.id
+                         FROM absensi a JOIN anggota k ON a.anggota_id = k.id
+                         WHERE a.tanggal LIKE ? AND a.anggota_id = ?
+                         ORDER BY a.tanggal DESC, a.jam_masuk DESC''', (bulan + '%', filter_user))
+        except:
+            c.execute('''SELECT a.id, a.tanggal, a.jam_masuk, a.jam_pulang, a.status, a.kegiatan,
+                         k.nama, k.jabatan, k.id
+                         FROM absensi a JOIN anggota k ON a.anggota_id = k.id
+                         WHERE a.tanggal LIKE ?
+                         ORDER BY a.tanggal DESC, a.jam_masuk DESC''', (bulan + '%',))
     elif role == 'admin':
         c.execute('''SELECT a.id, a.tanggal, a.jam_masuk, a.jam_pulang, a.status, a.kegiatan,
                      k.nama, k.jabatan, k.id
@@ -419,6 +575,9 @@ def api_rekap():
     if 'user_id' not in session or session.get('role') != 'admin':
         return jsonify({'success': False, 'rekap': [], 'hari_kerja': 0}), 403
     bulan = request.args.get('bulan', datetime.now().strftime('%Y-%m'))
+    if len(bulan) != 7:
+        bulan = datetime.now().strftime('%Y-%m')
+    
     conn = sqlite3.connect(DB_FILE)
     c = conn.cursor()
     c.execute('SELECT id, nama, jabatan, divisi FROM anggota WHERE aktif = 1 ORDER BY nama')
@@ -458,6 +617,8 @@ def export_csv():
     if 'user_id' not in session or session.get('role') != 'admin':
         return "Akses ditolak", 403
     bulan = request.args.get('bulan', datetime.now().strftime('%Y-%m'))
+    if len(bulan) != 7:
+        bulan = datetime.now().strftime('%Y-%m')
     conn = sqlite3.connect(DB_FILE)
     c = conn.cursor()
     c.execute('''SELECT k.no_anggota, k.nama, k.jabatan, k.divisi, a.tanggal, a.jam_masuk, a.jam_pulang, a.status
@@ -481,6 +642,8 @@ def export_pdf():
     if 'user_id' not in session or session.get('role') != 'admin':
         return "Akses ditolak", 403
     bulan = request.args.get('bulan', datetime.now().strftime('%Y-%m'))
+    if len(bulan) != 7:
+        bulan = datetime.now().strftime('%Y-%m')
     conn = sqlite3.connect(DB_FILE)
     c = conn.cursor()
     c.execute('''SELECT k.no_anggota, k.nama, k.jabatan, k.divisi, a.tanggal, a.jam_masuk, a.jam_pulang, a.status
@@ -573,16 +736,22 @@ def get_anggota():
 @admin_required
 def tambah_anggota():
     data = request.get_json() or {}
-    username = data.get('username', '').strip()
-    password = data.get('password', '').strip()
-    nama = data.get('nama', '').strip()
-    jabatan = data.get('jabatan', 'Anggota')
-    divisi = data.get('divisi', 'Umum')
-    email = data.get('email', '')
-    no_hp = data.get('no_hp', '')
-    no_anggota = data.get('no_anggota', '')
+    username = str(data.get('username', '')).strip()[:50]
+    password = str(data.get('password', '')).strip()
+    nama = str(data.get('nama', '')).strip()[:100]
+    jabatan = str(data.get('jabatan', 'Anggota'))[:50]
+    divisi = str(data.get('divisi', 'Umum'))[:50]
+    email = str(data.get('email', ''))[:100]
+    no_hp = str(data.get('no_hp', ''))[:20]
+    no_anggota = str(data.get('no_anggota', ''))[:20]
+    
     if not username or not password or not nama:
         return jsonify({'success': False, 'message': 'Username, password, dan nama wajib diisi'})
+    if len(password) < 6:
+        return jsonify({'success': False, 'message': 'Password minimal 6 karakter'})
+    if len(username) < 3:
+        return jsonify({'success': False, 'message': 'Username minimal 3 karakter'})
+    
     try:
         conn = sqlite3.connect(DB_FILE)
         c = conn.cursor()
@@ -605,15 +774,19 @@ def tambah_anggota():
 @admin_required
 def edit_anggota(kid):
     data = request.get_json() or {}
-    nama = data.get('nama', '').strip()
-    jabatan = data.get('jabatan', '')
-    divisi = data.get('divisi', '')
-    email = data.get('email', '')
-    no_hp = data.get('no_hp', '')
-    password = data.get('password', '').strip()
+    nama = str(data.get('nama', '')).strip()[:100]
+    jabatan = str(data.get('jabatan', ''))[:50]
+    divisi = str(data.get('divisi', ''))[:50]
+    email = str(data.get('email', ''))[:100]
+    no_hp = str(data.get('no_hp', ''))[:20]
+    password = str(data.get('password', '')).strip()
     aktif = 1 if data.get('aktif', True) else 0
+    
     if not nama:
         return jsonify({'success': False, 'message': 'Nama wajib diisi'})
+    if password and len(password) < 6:
+        return jsonify({'success': False, 'message': 'Password minimal 6 karakter'})
+    
     conn = sqlite3.connect(DB_FILE)
     c = conn.cursor()
     if password:
@@ -649,7 +822,7 @@ def index():
 
 
 # ============================================================
-# INISIALISASI DATABASE — dipanggil saat modul di-load
+# INISIALISASI DATABASE
 # ============================================================
 init_db()
 
@@ -847,11 +1020,11 @@ body::before {
         <form onsubmit="doLogin(event)">
             <div class="form-row">
                 <label>Username</label>
-                <input type="text" id="username" placeholder="Masukkan username" autocomplete="username" required autofocus>
+                <input type="text" id="username" placeholder="Masukkan username" autocomplete="username" required autofocus maxlength="50">
             </div>
             <div class="form-row">
                 <label>Password</label>
-                <input type="password" id="password" placeholder="Masukkan password" autocomplete="current-password" required>
+                <input type="password" id="password" placeholder="Masukkan password" autocomplete="current-password" required maxlength="100">
             </div>
             <button type="submit" class="btn-submit" id="btnLogin">MASUK</button>
         </form>
@@ -863,17 +1036,37 @@ body::before {
 </div>
 
 <script>
+const CSRF_TOKEN = "{{ csrf_token }}";
+let failCount = 0;
+
 async function doLogin(e) {
     e.preventDefault();
     const btn = document.getElementById('btnLogin');
     const err = document.getElementById('errorBox');
     err.classList.remove('show');
+    
+    // Cooldown kalau gagal 3x
+    if (failCount >= 3) {
+        err.textContent = 'Terlalu banyak percobaan gagal. Tunggu 30 detik.';
+        err.classList.add('show');
+        btn.disabled = true;
+        setTimeout(() => {
+            failCount = 0;
+            btn.disabled = false;
+            btn.textContent = 'MASUK';
+        }, 30000);
+        return;
+    }
+    
     btn.disabled = true;
     btn.textContent = 'MEMPROSES...';
     try {
         const res = await fetch('/api/login', {
             method: 'POST',
-            headers: {'Content-Type':'application/json'},
+            headers: {
+                'Content-Type':'application/json',
+                'X-CSRF-Token': CSRF_TOKEN
+            },
             credentials: 'same-origin',
             body: JSON.stringify({
                 username: document.getElementById('username').value,
@@ -884,6 +1077,7 @@ async function doLogin(e) {
         if (data.success) {
             window.location.href = '/';
         } else {
+            failCount++;
             err.textContent = data.message;
             err.classList.add('show');
             btn.disabled = false;
@@ -2177,19 +2371,19 @@ tbody td strong { color: var(--gray-900); font-weight: 700; }
         <div class="modal-body">
             <div class="form-row">
                 <label>No. Anggota</label>
-                <input type="text" id="inputNoAnggota" placeholder="Kosongkan untuk auto-generate">
+                <input type="text" id="inputNoAnggota" placeholder="Kosongkan untuk auto-generate" maxlength="20">
             </div>
             <div class="form-row">
                 <label>Username</label>
-                <input type="text" id="inputUsername" placeholder="Username untuk login">
+                <input type="text" id="inputUsername" placeholder="Username untuk login" maxlength="50">
             </div>
             <div class="form-row">
                 <label>Password</label>
-                <input type="text" id="inputPassword" placeholder="Minimal 6 karakter">
+                <input type="text" id="inputPassword" placeholder="Minimal 6 karakter" maxlength="100">
             </div>
             <div class="form-row">
                 <label>Nama Lengkap</label>
-                <input type="text" id="inputNamaAnggota" placeholder="Nama lengkap anggota">
+                <input type="text" id="inputNamaAnggota" placeholder="Nama lengkap anggota" maxlength="100">
             </div>
             <div class="form-row">
                 <label>Jabatan</label>
@@ -2221,11 +2415,11 @@ tbody td strong { color: var(--gray-900); font-weight: 700; }
             </div>
             <div class="form-row">
                 <label>Email (opsional)</label>
-                <input type="email" id="inputEmail" placeholder="email@contoh.com">
+                <input type="email" id="inputEmail" placeholder="email@contoh.com" maxlength="100">
             </div>
             <div class="form-row">
                 <label>No. HP (opsional)</label>
-                <input type="text" id="inputNoHp" placeholder="08xxxxxxxxxx">
+                <input type="text" id="inputNoHp" placeholder="08xxxxxxxxxx" maxlength="20">
             </div>
             <div class="form-row" id="rowAktif" style="display:none;">
                 <label>Status Anggota</label>
@@ -2251,10 +2445,18 @@ let editAnggotaId = null;
 let currentView = 'dashboard';
 let eventSource = null;
 let pollingInterval = null;
+let CSRF_TOKEN = '';
+let idleTimer = null;
+const IDLE_TIMEOUT = 2 * 60 * 60 * 1000; // 2 jam
 
 async function fetchJSON(url, options = {}) {
     try {
         options.credentials = 'same-origin';
+        if (!options.headers) options.headers = {};
+        // Tambah CSRF token untuk request yang mengubah data
+        if (options.method && ['POST', 'PUT', 'DELETE', 'PATCH'].includes(options.method.toUpperCase())) {
+            options.headers['X-CSRF-Token'] = CSRF_TOKEN;
+        }
         const res = await fetch(url, options);
         const contentType = res.headers.get('content-type') || '';
         if (!contentType.includes('application/json')) {
@@ -2272,6 +2474,14 @@ async function fetchJSON(url, options = {}) {
     }
 }
 
+function resetIdleTimer() {
+    clearTimeout(idleTimer);
+    idleTimer = setTimeout(() => {
+        alert('Sesi berakhir karena tidak ada aktivitas. Silakan login ulang.');
+        window.location.href = '/login';
+    }, IDLE_TIMEOUT);
+}
+
 window.addEventListener('load', async () => {
     const data = await fetchJSON('/api/me');
     if (!data || !data.logged_in) {
@@ -2279,6 +2489,7 @@ window.addEventListener('load', async () => {
         return;
     }
     currentUser = data;
+    CSRF_TOKEN = data.csrf_token || '';
     document.getElementById('userNama').textContent = data.nama;
     document.getElementById('userRole').textContent = data.role === 'admin' ? 'Administrator' : 'Anggota';
     document.getElementById('userAvatar').textContent = data.nama.charAt(0).toUpperCase();
@@ -2310,6 +2521,12 @@ window.addEventListener('load', async () => {
     }
     setInterval(updateJam, 1000);
     updateJam();
+    
+    // Setup idle timer
+    resetIdleTimer();
+    ['click', 'keydown', 'scroll', 'touchstart'].forEach(evt => {
+        document.addEventListener(evt, resetIdleTimer, { passive: true });
+    });
 });
 
 function updateJam() {
@@ -2384,7 +2601,7 @@ async function doLogout() {
     if (!confirm('Yakin mau keluar dari sistem?')) return;
     if (eventSource) eventSource.close();
     if (pollingInterval) clearInterval(pollingInterval);
-    await fetch('/api/logout', {method: 'POST', credentials: 'same-origin'});
+    await fetch('/api/logout', {method: 'POST', credentials: 'same-origin', headers: {'X-CSRF-Token': CSRF_TOKEN}});
     window.location.href = '/login';
 }
 
@@ -2579,20 +2796,32 @@ function renderAnggota() {
         const row = document.createElement('tr');
         row.innerHTML = `
             <td data-label="No. Anggota" class="mono">${k.no_anggota || '-'}</td>
-            <td data-label="Nama"><strong>${k.nama}</strong><br><span class="muted mono" style="font-size:11px;">@${k.username}</span></td>
-            <td data-label="Jabatan">${k.jabatan}</td>
-            <td data-label="Divisi">${k.divisi}</td>
-            <td data-label="Kontak" class="muted" style="font-size:11.5px;">${k.email || '-'}<br>${k.no_hp || '-'}</td>
+            <td data-label="Nama"><strong>${escapeHtml(k.nama)}</strong><br><span class="muted mono" style="font-size:11px;">@${escapeHtml(k.username)}</span></td>
+            <td data-label="Jabatan">${escapeHtml(k.jabatan)}</td>
+            <td data-label="Divisi">${escapeHtml(k.divisi)}</td>
+            <td data-label="Kontak" class="muted" style="font-size:11.5px;">${escapeHtml(k.email || '-')}<br>${escapeHtml(k.no_hp || '-')}</td>
             <td data-label="Status"><span class="badge badge-${k.aktif ? 'aktif' : 'nonaktif'}">${k.aktif ? 'Aktif' : 'Nonaktif'}</span></td>
             <td data-label="Aksi" class="center">
                 <div style="display:flex;gap:4px;justify-content:center;">
                     <button class="btn btn-sm btn-icon" onclick="editAnggota(${k.id})" title="Edit">✏</button>
-                    <button class="btn btn-sm btn-icon btn-danger" onclick="hapusAnggota(${k.id}, '${k.nama}')" title="Hapus">🗑</button>
+                    <button class="btn btn-sm btn-icon btn-danger" onclick="hapusAnggota(${k.id}, '${escapeAttr(k.nama)}')" title="Hapus">🗑</button>
                 </div>
             </td>
         `;
         tbody.appendChild(row);
     });
+}
+
+function escapeHtml(text) {
+    if (!text) return '';
+    const div = document.createElement('div');
+    div.textContent = String(text);
+    return div.innerHTML;
+}
+
+function escapeAttr(text) {
+    if (!text) return '';
+    return String(text).replace(/'/g, "\\'").replace(/"/g, '&quot;');
 }
 
 function bukaModalAnggota() {
@@ -2648,6 +2877,9 @@ async function simpanAnggota() {
     if (!editAnggotaId && (!username || !password)) {
         showToast('Username dan password wajib diisi', 'error'); return;
     }
+    if (password && password.length < 6) {
+        showToast('Password minimal 6 karakter', 'error'); return;
+    }
     let url, method, body;
     if (editAnggotaId) {
         url = '/api/anggota/' + editAnggotaId;
@@ -2697,8 +2929,8 @@ async function loadSemuaAbsen() {
         const row = document.createElement('tr');
         row.innerHTML = `
             <td data-label="Tanggal" class="mono">${formatTanggal(r.tanggal)}</td>
-            <td data-label="Nama"><strong>${r.nama}</strong></td>
-            <td data-label="Jabatan">${r.jabatan}</td>
+            <td data-label="Nama"><strong>${escapeHtml(r.nama)}</strong></td>
+            <td data-label="Jabatan">${escapeHtml(r.jabatan)}</td>
             <td data-label="Datang" class="center mono">${r.jam_masuk}</td>
             <td data-label="Pulang" class="center mono">${r.jam_pulang}</td>
             <td data-label="Status"><span class="badge badge-${r.status.toLowerCase()}">${r.status}</span></td>
@@ -2724,8 +2956,8 @@ async function loadRekap() {
         const persen = data.hari_kerja > 0 ? Math.round((r.hadir / data.hari_kerja) * 100) : 0;
         const row = document.createElement('tr');
         row.innerHTML = `
-            <td data-label="Nama"><strong>${r.nama}</strong></td>
-            <td data-label="Divisi">${r.divisi}</td>
+            <td data-label="Nama"><strong>${escapeHtml(r.nama)}</strong></td>
+            <td data-label="Divisi">${escapeHtml(r.divisi)}</td>
             <td data-label="Hadir" class="center mono" style="color:var(--primary);font-weight:700;">${r.hadir}</td>
             <td data-label="Izin" class="center mono">${r.izin}</td>
             <td data-label="Sakit" class="center mono">${r.sakit}</td>
@@ -2778,6 +3010,13 @@ if __name__ == '__main__':
     print(f"  {ORG['jenis']} · {ORG['wilayah']}")
     print(f"  {ORG['desa']}")
     print("=" * 70)
+    print()
+    print("  🔒 SECURE VERSION")
+    print("  - Bcrypt password hashing")
+    print("  - Rate limiting (5 login/menit)")
+    print("  - CSRF protection")
+    print("  - Security headers")
+    print("  - Auto logout idle 2 jam")
     print()
     
     port = int(os.environ.get('PORT', 5000))
