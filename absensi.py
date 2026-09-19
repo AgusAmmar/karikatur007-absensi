@@ -14,11 +14,13 @@ from queue import Queue, Empty
 try:
     from flask import Flask, request, jsonify, render_template_string, session, redirect, url_for, send_file, make_response, Response
     from flask_cors import CORS
+    from werkzeug.middleware.proxy_fix import ProxyFix
 except ImportError:
-    print("Install Flask...")
-    subprocess.check_call([sys.executable, "-m", "pip", "install", "flask", "flask-cors", "--quiet"])
+    print("Install dependencies...")
+    subprocess.check_call([sys.executable, "-m", "pip", "install", "flask", "flask-cors", "werkzeug", "--quiet"])
     from flask import Flask, request, jsonify, render_template_string, session, redirect, url_for, send_file, make_response, Response
     from flask_cors import CORS
+    from werkzeug.middleware.proxy_fix import ProxyFix
 
 # ============================================================
 # KONFIGURASI
@@ -44,10 +46,13 @@ IS_PRODUCTION = bool(
 )
 
 app = Flask(__name__)
+# ProxyFix: supaya Flask tahu dia di belakang proxy HTTPS (Railway)
+app.wsgi_app = ProxyFix(app.wsgi_app, x_for=1, x_proto=1, x_host=1, x_prefix=1)
 app.secret_key = SECRET_KEY
 app.config['SESSION_COOKIE_SAMESITE'] = 'Lax'
-app.config['SESSION_COOKIE_SECURE'] = bool(IS_PRODUCTION)
+app.config['SESSION_COOKIE_SECURE'] = False
 app.config['SESSION_COOKIE_HTTPONLY'] = True
+app.config['SESSION_COOKIE_DOMAIN'] = None
 app.config['PERMANENT_SESSION_LIFETIME'] = timedelta(days=7)
 CORS(app, supports_credentials=True)
 
@@ -2002,6 +2007,7 @@ tbody td strong { color: var(--gray-900); font-weight: 700; }
                 <option value="Seni">Seni</option>
                 <option value="Keamanan">Keamanan</option>
                 <option value="Sosial">Sosial</option>
+                <option value="Keagamaan">Keagamaan</option>
                 <option value="Umum">Umum</option>
             </select>
         </div>
@@ -2164,6 +2170,9 @@ tbody td strong { color: var(--gray-900); font-weight: 700; }
                     <option value="Wakil Ketua">Wakil Ketua</option>
                     <option value="Sekretaris">Sekretaris</option>
                     <option value="Bendahara">Bendahara</option>
+                    <option value="Sie Humas">Sie Humas</option>
+                    <option value="Sie Keagamaan">Sie Keagamaan</option>
+                    <option value="Sie Olahraga">Sie Olahraga</option>
                     <option value="Koordinator">Koordinator</option>
                 </select>
             </div>
@@ -2177,6 +2186,7 @@ tbody td strong { color: var(--gray-900); font-weight: 700; }
                     <option value="Seni">Seni</option>
                     <option value="Keamanan">Keamanan</option>
                     <option value="Sosial">Sosial</option>
+                    <option value="Keagamaan">Keagamaan</option>
                     <option value="Umum">Umum</option>
                 </select>
             </div>
